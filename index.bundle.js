@@ -1,3 +1,7 @@
+// deno-fmt-ignore-file
+// deno-lint-ignore-file
+// This code was bundled using `deno bundle` and it's not recommended to edit it manually
+
 function removeEmptyValues(obj) {
     return Object.fromEntries(Object.entries(obj).filter(([, value])=>{
         if (value === null) return false;
@@ -117,9 +121,6 @@ function corsHeaders() {
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS"
     };
 }
-function browserHeaders() {
-    return Object.assign(jsonHeaders(), corsHeaders());
-}
 function contentLengthHeader(b) {
     const len = !b || !b.byteLength ? "0" : b.byteLength.toString();
     return {
@@ -136,46 +137,100 @@ function rxidFromHeader(h) {
 function copyHeaders(request) {
     const headers = {};
     if (!request || !request.headers) return headers;
-    request.headers.forEach((val, name)=>{
-        headers[name] = val;
+    request.headers.forEach((val, name1)=>{
+        headers[name1] = val;
     });
     return headers;
 }
+function sleep(ms) {
+    return new Promise((resolve, reject)=>{
+        try {
+            setTimeout(resolve, ms);
+        } catch (e) {
+            reject(e);
+        }
+    });
+}
 function objOf(map) {
     return map.entries ? Object.fromEntries(map) : {};
+}
+function timedSafeAsyncOp(promisedOp, ms, defaultOp) {
+    return new Promise((resolve, reject)=>{
+        let timedout = false;
+        const defferedOp = ()=>{
+            defaultOp().then((v)=>{
+                resolve(v);
+            }).catch((e)=>{
+                reject(e);
+            });
+        };
+        const tid = timeout(ms, ()=>{
+            timedout = true;
+            defferedOp();
+        });
+        promisedOp().then((out)=>{
+            if (!timedout) {
+                clearTimeout(tid);
+                resolve(out);
+            }
+        }).catch((ignored)=>{
+            if (!timedout) defferedOp();
+        });
+    });
 }
 function timeout(ms, callback) {
     if (typeof callback !== "function") return -1;
     return setTimeout(callback, ms);
 }
+function rand(min, max) {
+    return Math.floor(Math.random() * (max - min)) + min;
+}
+function rolldice(sides = 6) {
+    return rand(1, sides + 1);
+}
 function uid() {
     return (Math.random() + 1).toString(36).slice(1);
 }
 function xid() {
-    const hi = uid().slice(1);
+    const hi = vmid();
     const lo = uid();
     return hi + lo;
 }
-function microtaskBox(...fns) {
+let _vmid = "0";
+function vmid() {
+    if (_vmid === "0") _vmid = uid().slice(1);
+    return _vmid;
+}
+const taskboxPromise = {
+    p: Promise.resolve()
+};
+function microtaskBox(fns, arg) {
     let enqueue = null;
-    if (typeof queueMicroTask === "function") {
-        enqueue = queueMicroTask;
+    if (typeof queueMicrotask === "function") {
+        enqueue = queueMicrotask;
     } else {
-        const p = Promise.resolve();
-        enqueue = p.then.bind(p);
+        enqueue = taskboxPromise.p.then.bind(taskboxPromise.p);
     }
-    enqueue(()=>safeBox(...fns)
+    enqueue(()=>safeBox(fns, arg)
     );
 }
-function safeBox(...fns) {
+function safeBox(fns, arg) {
+    if (typeof fns === "function") {
+        fns = [
+            fns
+        ];
+    }
     const r = [];
+    if (!isIterable(fns)) {
+        return r;
+    }
     for (const f of fns){
         if (typeof f !== "function") {
             r.push(null);
             continue;
         }
         try {
-            r.push(f());
+            r.push(f(arg));
         } catch (ignore) {
             r.push(null);
         }
@@ -194,15 +249,13 @@ function emptyResponse() {
     };
 }
 function errResponse(id, err) {
+    const st = emptyObj(err) || !err.stack ? "no-stacktrace" : err.stack;
     return {
         isException: true,
-        exceptionStack: err.stack,
+        exceptionStack: st,
         exceptionFrom: id,
         data: {}
     };
-}
-function mapOf(obj) {
-    return new Map(Object.entries(obj));
 }
 function emptyString(str) {
     if (!str) return true;
@@ -212,13 +265,22 @@ function emptyString(str) {
 function emptyArray(a) {
     if (!a) return true;
     if (typeof a !== "object") return false;
-    return !!a.length && a.length <= 0;
+    return a.length <= 0;
 }
 function concatObj(...args) {
     return Object.assign(...args);
 }
 function emptyObj(x) {
-    return !x || Object.keys(x).length <= 0;
+    if (!x) return true;
+    return Object.keys(x).length === 0 && Object.getPrototypeOf(x) === Object.prototype;
+}
+function emptyMap(m) {
+    if (!m) return true;
+    return m.size === 0;
+}
+function isIterable(obj) {
+    if (obj == null) return false;
+    return typeof obj[Symbol.iterator] === "function";
 }
 function respond204() {
     return new Response(null, {
@@ -272,9 +334,9 @@ const waitGroup = new Map();
         waitGroup.set(se, new Set());
     }
 })();
-function pub(event) {
-    awaiters(event);
-    callbacks(event);
+function pub(event, parcel = undefined) {
+    awaiters(event, parcel);
+    callbacks(event, parcel);
 }
 function sub(event, cb) {
     const eventCallbacks = listeners.get(event);
@@ -300,28 +362,28 @@ function when(event, timeout1 = 0) {
         const tid = timeout1 > 0 ? timeout(timeout1, ()=>{
             reject(new Error(event + " elapsed " + timeout1));
         }) : -2;
-        const fulfiller = function() {
+        const fulfiller = function(parcel) {
             if (tid >= 0) clearTimeout(tid);
-            accept(event);
+            accept(parcel, event);
         };
         wg.add(fulfiller);
     });
 }
-function awaiters(event) {
+function awaiters(event, parcel) {
     const g = waitGroup.get(event);
     if (!g) return;
     if (stickyEvents.has(event)) {
         waitGroup.delete(event);
     }
-    safeBox(...g);
+    safeBox(g, parcel);
 }
-function callbacks(event) {
-    const eventCallbacks = listeners.get(event);
-    if (!eventCallbacks) return;
+function callbacks(event, parcel) {
+    const cbs = listeners.get(event);
+    if (!cbs) return;
     if (stickyEvents.has(event)) {
         listeners.delete(event);
     }
-    microtaskBox(...eventCallbacks);
+    microtaskBox(cbs, parcel);
 }
 const _LOG_LEVELS = new Map([
     "error",
@@ -434,7 +496,7 @@ class Log {
     setLevel(level) {
         if (!_LOG_LEVELS.has(level)) throw new Error(`Unknown log level: ${level}`);
         if (console.level && _LOG_LEVELS.get(level) < _LOG_LEVELS.get(console.level)) {
-            throw new Error("Cannot set " + `(log.level='${level}') < (console.level = '${console.level}')`);
+            throw new Error(`(log='${level}') < (console='${console.level}')`);
         }
         this._resetLevel();
         switch(level){
@@ -444,10 +506,10 @@ class Log {
                 this.debug = console.debug;
             case "timer":
                 this.lapTime = console.timeLog;
-                this.startTime = function(name1) {
-                    name1 += uid();
-                    console.time(name1);
-                    return name1;
+                this.startTime = function(name2) {
+                    name2 += uid();
+                    console.time(name2);
+                    return name2;
                 };
                 this.endTime = console.timeEnd;
             case "info":
@@ -463,101 +525,95 @@ class Log {
         this.level = level;
     }
 }
-const _ENV_VAR_MAPPINGS = {
-    runTime: {
-        name: "RUNTIME",
-        type: "string"
+const defaults = {
+    RUNTIME: {
+        type: "string",
+        default: _determineRuntime()
     },
-    runTimeEnv: {
-        name: {
-            worker: "WORKER_ENV",
-            node: "NODE_ENV",
-            deno: "DENO_ENV"
-        },
-        type: "string"
+    WORKER_ENV: {
+        type: "string",
+        default: "development"
     },
-    cloudPlatform: {
-        name: "CLOUD_PLATFORM",
-        type: "string"
+    DENO_ENV: {
+        type: "string",
+        default: "development"
     },
-    logLevel: {
-        name: "LOG_LEVEL",
-        type: "string"
+    NODE_ENV: {
+        type: "string",
+        default: "development"
     },
-    blocklistUrl: {
-        name: "CF_BLOCKLIST_URL",
-        type: "string"
+    CLOUD_PLATFORM: {
+        type: "string",
+        default: "fly"
     },
-    latestTimestamp: {
-        name: "CF_LATEST_BLOCKLIST_TIMESTAMP",
-        type: "string"
+    LOG_LEVEL: {
+        type: "string",
+        default: "debug"
     },
-    dnsResolverUrl: {
-        name: "CF_DNS_RESOLVER_URL",
-        type: "string"
+    CF_BLOCKLIST_URL: {
+        type: "string",
+        default: "https://dist.rethinkdns.com/blocklists/"
     },
-    onInvalidFlagStopProcessing: {
-        name: "CF_ON_INVALID_FLAG_STOPPROCESSING",
-        type: "boolean"
+    CF_LATEST_BLOCKLIST_TIMESTAMP: {
+        type: "string",
+        default: "1638959365361"
     },
-    workerTimeout: {
-        name: "WORKER_TIMEOUT",
-        type: "number"
+    CF_DNS_RESOLVER_URL: {
+        type: "string",
+        default: "https://cloudflare-dns.com/dns-query"
     },
-    fetchTimeout: {
-        name: "CF_BLOCKLIST_DOWNLOAD_TIMEOUT",
-        type: "number"
+    CF_DNS_RESOLVER_URL_2: {
+        type: "string",
+        default: "https://dns.google/dns-query"
     },
-    tdNodecount: {
-        name: "TD_NODE_COUNT",
-        type: "number"
+    WORKER_TIMEOUT: {
+        type: "number",
+        default: "10000"
     },
-    tdParts: {
-        name: "TD_PARTS",
-        type: "number"
+    CF_BLOCKLIST_DOWNLOAD_TIMEOUT: {
+        type: "number",
+        default: "5000"
     },
-    isAggCacheReq: {
-        name: {
-            worker: "IS_AGGRESSIVE_CACHE_REQ"
-        },
-        type: "boolean"
+    TD_NODE_COUNT: {
+        type: "number",
+        default: "42112224"
+    },
+    TD_PARTS: {
+        type: "number",
+        default: "2"
+    },
+    CACHE_TTL: {
+        type: "number",
+        default: "1800"
     }
 };
-function _getRuntimeEnv(runtime) {
-    console.info("Loading env. from runtime:", runtime);
+function defaultEnv() {
     const env = {};
-    for (const [key, mappedKey] of Object.entries(_ENV_VAR_MAPPINGS)){
-        let name2 = null;
-        let type = null;
+    for (const [key, mappedKey] of Object.entries(defaults)){
         if (typeof mappedKey !== "object") continue;
-        if (typeof mappedKey.name === "object") {
-            name2 = mappedKey.name[runtime];
-        } else {
-            name2 = mappedKey.name;
-        }
-        type = mappedKey.type;
-        if (!type) {
-            console.debug(runtime, "untyped env mapping:", key, mappedKey);
+        const type = mappedKey.type;
+        const val = mappedKey.default;
+        if (!type || val == null) {
+            console.debug(key, "incomplete env val:", mappedKey);
             continue;
         }
-        if (runtime === "node") env[key] = process.env[name2];
-        else if (runtime === "deno") env[key] = name2 && Deno.env.get(name2);
-        else if (runtime === "worker") env[key] = globalThis[name2];
-        else throw new Error(`unsupported runtime: ${runtime}`);
-        if (type === "boolean") env[key] = env[key] === "true";
-        else if (type === "number") env[key] = Number(env[key]);
-        else if (type === "string") env[key] = env[key] || "";
-        else throw new Error(`unsupported type: ${type}`);
-        console.debug("Added", key, mappedKey, env[key]);
+        env[key] = caststr(val, type);
     }
     return env;
+}
+function caststr(x, typ) {
+    if (typeof x === typ) return x;
+    if (typ === "boolean") return x === "true";
+    else if (typ === "number") return Number(x);
+    else if (typ === "string") return x && x + "" || "";
+    else throw new Error(`unsupported type: ${typ}`);
 }
 function _determineRuntime() {
     if (typeof Deno !== "undefined") {
         return Deno.env.get("RUNTIME") || "deno";
     }
+    if (globalThis.wenv) return wenv.RUNTIME || "worker";
     if (typeof process !== "undefined") {
-        if (globalThis.RUNTIME) return globalThis.RUNTIME;
         if (process.env) return process.env.RUNTIME || "node";
     }
     return null;
@@ -569,37 +625,31 @@ class EnvManager {
         this.load();
     }
     load() {
-        const renv = _getRuntimeEnv(this.runtime);
-        if (this.runtime === "deno" && !renv.runTime) {
-            renv.runTime = "deno";
-        }
-        globalThis.env = renv;
-        for (const [k, v] of Object.entries(renv)){
+        const d = defaultEnv(this.runtime);
+        for (const [k, v] of Object.entries(d)){
             this.envMap.set(k, v);
         }
-        console.debug("Env loaded: ", JSON.stringify(renv));
+        console.debug("defaults: ", JSON.stringify(d));
     }
-    getMap() {
-        return this.envMap;
-    }
-    toObject() {
-        return Object.fromEntries(this.envMap);
-    }
-    get(key) {
-        const v = this.envMap.get(key);
-        if (v) return v;
+    get(k) {
+        let v = null;
         if (this.runtime === "node") {
-            return process.env[key];
+            v = process.env[k];
         } else if (this.runtime === "deno") {
-            return Deno.env.get(key);
+            v = Deno.env.get(k);
         } else if (this.runtime === "worker") {
-            return globalThis[key];
+            v = globalThis.wenv[k];
         }
-        return null;
+        if (v == null) {
+            v = this.envMap.get(k);
+        }
+        const m = defaults[k];
+        if (m && v != null) v = caststr(v, m.type);
+        return v;
     }
-    set(key, value) {
-        this.envMap.set(key, value);
-        globalThis.env[key] = value;
+    set(k, v, typ) {
+        typ = typ || "string";
+        this.envMap.set(k, caststr(v, typ));
     }
 }
 ((main)=>{
@@ -613,15 +663,10 @@ function setup() {
             export: true
         });
     } catch (e) {
-        console.warn(".env file may not be loaded => ", e.name, ":", e.message);
-    }
-    try {
-        Deno.env.set("RUNTIME", "deno");
-    } catch (e1) {
-        console.warn("Deno.env.set() is not available => ", e1.name, ":", e1.message);
+        console.warn(".env missing => ", e.name, e.message);
     }
     window.envManager = new EnvManager();
-    window.log = new Log(window.env.logLevel, isProd);
+    window.log = new Log(window.envManager.get("LOG_LEVEL"), isProd);
     pub("ready");
 }
 const hexTable = new TextEncoder().encode("0123456789abcdef");
@@ -3015,7 +3060,7 @@ function emptyBuf(b) {
     return !b || !!b.byteLength && b.byteLength <= 0;
 }
 function arrayBufferOf(buf) {
-    if (!buf) return null;
+    if (emptyBuf(buf)) return null;
     const offset = buf.byteOffset;
     const len = buf.byteLength;
     return buf.buffer.slice(offset, offset + len);
@@ -5279,14 +5324,98 @@ function decodeList(list, enc, buf, offset) {
     }
     return offset;
 }
+function onDenoDeploy() {
+    if (!envManager) return false;
+    return envManager.get("CLOUD_PLATFORM") === "deno-deploy";
+}
+function onCloudflare() {
+    if (!envManager) return false;
+    return envManager.get("CLOUD_PLATFORM") === "cloudflare";
+}
+function hasDynamicImports() {
+    if (onDenoDeploy() || onCloudflare()) return false;
+    return true;
+}
+function hasHttpCache() {
+    return isWorkers();
+}
 function isWorkers() {
-    return env && env.runTime === "worker";
+    if (!envManager) return false;
+    return envManager.get("RUNTIME") === "worker";
 }
 function isNode() {
-    return env && env.runTime === "node";
+    if (!envManager) return false;
+    return envManager.get("RUNTIME") === "node";
 }
-function workersTimeout(defaultValue = 0) {
-    return env && env.workerTimeout || defaultValue;
+function isDeno() {
+    if (!envManager) return false;
+    return envManager.get("RUNTIME") === "deno";
+}
+function workersTimeout(missing = 0) {
+    if (!envManager) return missing;
+    return envManager.get("WORKER_TIMEOUT") || missing;
+}
+function downloadTimeout(missing = 0) {
+    if (!envManager) return missing;
+    return envManager.get("CF_BLOCKLIST_DOWNLOAD_TIMEOUT") || missing;
+}
+function blocklistUrl() {
+    if (!envManager) return null;
+    return envManager.get("CF_BLOCKLIST_URL");
+}
+function timestamp() {
+    if (!envManager) return null;
+    return envManager.get("CF_LATEST_BLOCKLIST_TIMESTAMP");
+}
+function tdNodeCount() {
+    if (!envManager) return null;
+    return envManager.get("TD_NODE_COUNT");
+}
+function tdParts() {
+    if (!envManager) return null;
+    return envManager.get("TD_PARTS");
+}
+function primaryDohResolver() {
+    if (!envManager) return null;
+    return envManager.get("CF_DNS_RESOLVER_URL");
+}
+function secondaryDohResolver() {
+    if (!envManager) return null;
+    return envManager.get("CF_DNS_RESOLVER_URL_2");
+}
+function dohResolvers() {
+    if (!envManager) return null;
+    if (isWorkers()) {
+        return [
+            primaryDohResolver(),
+            secondaryDohResolver()
+        ];
+    }
+    return [
+        primaryDohResolver()
+    ];
+}
+function tlsCrtPath() {
+    if (!envManager) return "";
+    return envManager.get("TLS_CRT_PATH") || "";
+}
+function tlsKeyPath() {
+    if (!envManager) return "";
+    return envManager.get("TLS_KEY_PATH") || "";
+}
+function cacheTtl() {
+    if (!envManager) return 0;
+    return envManager.get("CACHE_TTL");
+}
+function isDotOverProxyProto() {
+    if (!envManager) return false;
+    return envManager.get("DOT_HAS_PROXY_PROTO") || false;
+}
+function dohBackendPort() {
+    return 8080;
+}
+function dotBackendPort() {
+    return isDotOverProxyProto() ? 10001 : 10000;
 }
 const minDNSPacketSize = 12 + 5;
 const _dnsCloudflareSec = "1.1.1.2";
@@ -5294,10 +5423,14 @@ function dnsIpv4() {
     return _dnsCloudflareSec;
 }
 function cacheSize() {
-    return 10000;
+    return 20000;
+}
+function isAnswer(packet) {
+    if (emptyObj(packet)) return false;
+    return packet.type === "response";
 }
 function servfail(qid, qs) {
-    if (!qid || !qs) return null;
+    if (qid == null || qid < 0 || emptyArray(qs)) return null;
     return encode3({
         id: qid,
         type: "response",
@@ -5305,12 +5438,22 @@ function servfail(qid, qs) {
         questions: qs
     });
 }
+function servfailQ(q) {
+    if (emptyBuf(q)) return null;
+    try {
+        const p = decode3(q);
+        return servfail(p.id, p.questions);
+    } catch (e) {
+        return null;
+    }
+}
 function requestTimeout() {
-    const t = workersTimeout(15000);
-    return t > 5000 ? Math.min(t, 30000) : 5000;
+    const t = workersTimeout();
+    return t > 4000 ? Math.min(t, 30000) : 4000;
 }
 function truncated(ans) {
-    if (ans.length < 12) return false;
+    if (emptyBuf(ans)) return false;
+    if (ans.byteLength < 12) return false;
     const flags = ans.readUInt16BE(2);
     const tc = flags >> 9 & 1;
     return tc === 1;
@@ -5328,10 +5471,12 @@ function hasSingleQuestion(packet) {
     return !emptyObj(packet) && !emptyArray(packet.questions) && packet.questions.length === 1;
 }
 function rcodeNoError(packet) {
-    return packet && packet.rcode === "NOERROR";
+    if (emptyObj(packet)) return false;
+    return packet.rcode === "NOERROR";
 }
 function optAnswer(a) {
-    return a && a.type && a.type.toUpperCase() === "OPT";
+    if (emptyObj(a) || emptyString(a.type)) return false;
+    return a.type.toUpperCase() === "OPT";
 }
 function decode3(arrayBuffer) {
     if (!validResponseSize(arrayBuffer)) {
@@ -5344,16 +5489,20 @@ function encode3(obj) {
     if (emptyObj(obj)) {
         throw new Error("failed encoding an empty dns-obj");
     }
-    return encode2(obj);
+    const b = encode2(obj);
+    return arrayBufferOf(b);
 }
-function isBlockable(packet) {
+function isQueryBlockable(packet) {
     return hasSingleQuestion(packet) && (packet.questions[0].type === "A" || packet.questions[0].type === "AAAA" || packet.questions[0].type === "CNAME" || packet.questions[0].type === "HTTPS" || packet.questions[0].type === "SVCB");
+}
+function isAnswerBlockable(packet) {
+    return isCname(packet) || isHttps(packet);
 }
 function isCname(packet) {
     return hasAnswers(packet) && isAnswerCname(packet.answers[0]);
 }
 function isAnswerCname(ans) {
-    return !emptyObj(ans) && !emptyString(ans.type) && ans.type === "CNAME";
+    return !emptyObj(ans) && ans.type === "CNAME";
 }
 function isHttps(packet) {
     return hasAnswers(packet) && isAnswerHttps(packet.answers[0]);
@@ -5387,17 +5536,13 @@ function extractDomains(dnsPacket) {
         ...names
     ];
 }
-function getQueryName(questions) {
-    const qn = normalizeName(questions[0].name);
-    return emptyString(qn) ? false : qn;
-}
 function normalizeName(n) {
     if (emptyString(n)) return n;
     return n.trim().toLowerCase();
 }
 class CurrentRequest {
     constructor(){
-        this.blockedB64Flag = "";
+        this.flag = "";
         this.decodedDnsPacket = this.emptyDecodedDnsPacket();
         this.httpResponse = undefined;
         this.isException = false;
@@ -5412,7 +5557,7 @@ class CurrentRequest {
     }
     emptyDecodedDnsPacket() {
         return {
-            id: 0,
+            id: null,
             questions: null
         };
     }
@@ -5434,36 +5579,40 @@ class CurrentRequest {
         }
         const qid = this.decodedDnsPacket.id;
         const questions = this.decodedDnsPacket.questions;
+        const servfail1 = servfail(qid, questions);
         const ex = {
             exceptionFrom: this.exceptionFrom,
             exceptionStack: this.exceptionStack
         };
-        const servfail2 = servfail(qid, questions);
-        this.httpResponse = new Response(servfail2, {
-            headers: concatHeaders(this.headers(), this.additionalHeader(JSON.stringify(ex))),
-            status: servfail2 ? 200 : 500
+        this.httpResponse = new Response(servfail1, {
+            headers: concatHeaders(this.headers(servfail1), this.additionalHeader(JSON.stringify(ex))),
+            status: servfail1 ? 200 : 408
         });
     }
     hResponse(r) {
-        if (emptyObj(r)) return;
+        if (emptyObj(r)) {
+            this.log.w("no http-res to set, empty obj?", r);
+            return;
+        }
         this.httpResponse = r;
         this.stopProcessing = true;
     }
-    dnsResponse(arrayBuffer, dnsPacket = null) {
+    dnsResponse(arrayBuffer, dnsPacket = null, blockflag = null) {
         if (emptyBuf(arrayBuffer)) {
             return;
         }
         this.stopProcessing = true;
-        this.decodedDnsPacket = dnsPacket || this.decodedDnsPacket;
+        this.decodedDnsPacket = dnsPacket || decode3(arrayBuffer);
+        this.flag = blockflag || "";
         this.httpResponse = new Response(arrayBuffer, {
-            headers: this.headers()
+            headers: this.headers(arrayBuffer)
         });
     }
     dnsBlockResponse(blockflag) {
         this.initDecodedDnsPacketIfNeeded();
         this.stopProcessing = true;
         this.isDnsBlock = true;
-        this.blockedB64Flag = blockflag;
+        this.flag = blockflag;
         try {
             if (emptyObj(this.decodedDnsPacket.questions)) {
                 throw new Error("decoded dns packet missing");
@@ -5491,11 +5640,12 @@ class CurrentRequest {
                 this.decodedDnsPacket.answers[0].data.svcParams = {};
             }
             this.decodedDnsPacket.authorities = [];
-            this.httpResponse = new Response(encode3(this.decodedDnsPacket), {
-                headers: this.headers()
+            const b = encode3(this.decodedDnsPacket);
+            this.httpResponse = new Response(b, {
+                headers: this.headers(b)
             });
         } catch (e) {
-            this.log.e("dnsBlock", JSON.stringify(this.decodedDnsPacket), e);
+            this.log.e("dnsBlock", JSON.stringify(this.decodedDnsPacket), e.stack);
             this.isException = true;
             this.exceptionStack = e.stack;
             this.exceptionFrom = "CurrentRequest dnsBlockResponse";
@@ -5505,14 +5655,14 @@ class CurrentRequest {
             });
         }
     }
-    headers() {
+    headers(b = null) {
         const xNileFlags = this.isDnsBlock ? {
-            "x-nile-flags": this.blockedB64Flag
+            "x-nile-flags": this.flag
         } : null;
-        const xNileFlagsAllowed = this.blockedB64Flag ? {
-            "x-nile-flags-allowed": this.blockedB64Flag
+        const xNileFlagsOk = !xNileFlags ? {
+            "x-nile-flags-dn": this.flag
         } : null;
-        return concatHeaders(dnsHeaders(), xNileFlags, xNileFlagsAllowed);
+        return concatHeaders(dnsHeaders(), contentLengthHeader(b), xNileFlags, xNileFlagsOk);
     }
     additionalHeader(json) {
         if (!json) return null;
@@ -5522,8 +5672,161 @@ class CurrentRequest {
     }
     setCorsHeadersIfNeeded() {
         if (emptyObj(this.httpResponse) || !this.httpResponse.ok) return;
-        for (const [name10, value] of Object.entries(corsHeaders())){
-            this.httpResponse.headers.set(name10, value);
+        for (const [k, v] of Object.entries(corsHeaders())){
+            this.httpResponse.headers.set(k, v);
+        }
+    }
+}
+const minlives = 1;
+const maxlives = 2 ** 14;
+const mincap = 2 ** 5;
+const maxcap = 2 ** 32;
+const minslots = 2;
+class Clock {
+    constructor(cap, slotsperhand = 256, maxlife = 16){
+        cap = this.bound(cap, mincap, maxcap);
+        this.capacity = 2 ** Math.round(Math.log2(cap));
+        this.rb = new Array(this.capacity);
+        this.rb.fill(null);
+        this.store = new Map();
+        this.maxcount = this.bound(maxlife, minlives, maxlives);
+        this.totalhands = Math.max(minslots, Math.round(this.capacity / slotsperhand));
+        this.hands = new Array(this.totalhands);
+        for(let i26 = 0; i26 < this.totalhands; i26++)this.hands[i26] = i26;
+    }
+    next(i27) {
+        const n = i27 + this.totalhands;
+        return (this.capacity + n) % this.capacity;
+    }
+    cur(i28) {
+        return (this.capacity + i28) % this.capacity;
+    }
+    prev(i29) {
+        const p = i29 - this.totalhands;
+        return (this.capacity + p) % this.capacity;
+    }
+    bound(i30, min, max) {
+        i30 = i30 < min ? min : i30;
+        i30 = i30 > max ? max - 1 : i30;
+        return i30;
+    }
+    head(n) {
+        n = this.bound(n, 0, this.totalhands);
+        const h = this.hands[n];
+        return this.cur(h);
+    }
+    incrHead(n) {
+        n = this.bound(n, 0, this.totalhands);
+        this.hands[n] = this.next(this.hands[n]);
+        return this.hands[n];
+    }
+    decrHead(n) {
+        n = this.bound(n, 0, this.totalhands);
+        this.hands[n] = this.prev(this.hands[n]);
+        return this.hands[n];
+    }
+    get size() {
+        return this.store.size;
+    }
+    evict(n, c) {
+        logd("evict start, head/num/size", this.head(n), n, this.size);
+        const start = this.head(n);
+        let h = start;
+        do {
+            const entry = this.rb[h];
+            if (entry === null) return true;
+            entry.count -= c;
+            if (entry.count <= 0) {
+                logd("evict", h, entry);
+                this.store.delete(entry.key);
+                this.rb[h] = null;
+                return true;
+            }
+            h = this.incrHead(n);
+        }while (h !== start)
+        return false;
+    }
+    put(k, v, c = 1) {
+        const cached = this.store.get(k);
+        if (cached) {
+            cached.value = v;
+            const at = this.rb[cached.pos];
+            at.count = Math.min(at.count + c, this.maxcount);
+            return true;
+        }
+        const num = this.rolldice;
+        this.evict(num, c);
+        const h = this.head(num);
+        const hasSlot = this.rb[h] === null;
+        if (!hasSlot) return false;
+        const ringv = {
+            key: k,
+            count: Math.min(c, this.maxcount)
+        };
+        const storev = {
+            value: v,
+            pos: h
+        };
+        this.rb[h] = ringv;
+        this.store.set(k, storev);
+        this.incrHead(num);
+        return true;
+    }
+    val(k, c = 1) {
+        const r = this.store.get(k);
+        if (!r) return null;
+        const at = this.rb[r.pos];
+        at.count = Math.min(at.count + c, this.maxcount);
+        return r.value;
+    }
+    get rolldice() {
+        const max = this.totalhands;
+        return Math.floor(Math.random() * (max - 0)) + 0;
+    }
+}
+function logd() {}
+class LfuCache {
+    constructor(id, capacity){
+        this.id = id;
+        this.cache = new Clock(capacity);
+    }
+    Get(key) {
+        let val = false;
+        try {
+            val = this.cache.val(key) || false;
+        } catch (e) {
+            console.log("Error: " + this.id + " -> Get");
+            console.log(e.stack);
+        }
+        return val;
+    }
+    Put(key, val) {
+        try {
+            this.cache.put(key, val);
+        } catch (e) {
+            console.log("Error: " + this.id + " -> Put");
+            console.log(e.stack);
+        }
+    }
+}
+class TrieCache {
+    constructor(){
+        const name10 = "TrieNodeCache";
+        if (true) return;
+        const size = Math.floor(tdNodeCount() * 0.2);
+        this.localCache = new LfuCache(name10, size);
+        this.log = log.withTags(name10);
+    }
+    get(key) {
+        if (true) return false;
+        return this.localCache.Get(key);
+    }
+    put(key, val) {
+        if (true) return;
+        try {
+            this.localCache.Put(key, val);
+        } catch (e) {
+            this.log.e("put", key, val, e.stack);
         }
     }
 }
@@ -5669,9 +5972,6 @@ BitString.prototype = {
         } else {
             let result = this.bytes[p / W | 0] & BitString.MaskTop[W][p % W];
             let tmpCount = 0;
-            const disp1 = this.bytes[p / W | 0];
-            const disp2 = BitString.MaskTop[W][p % W];
-            const res1 = result;
             const l = W - p % W;
             p += l;
             n -= l;
@@ -5681,12 +5981,8 @@ BitString.prototype = {
                 p += W;
                 n -= W;
             }
-            const res2 = result;
             if (n > 0) {
                 result = result << n | this.bytes[p / W | 0] >> W - n;
-            }
-            if (debug) {
-                console.log("disp1: " + disp1 + " disp2: " + disp2 + " loopcount: " + tmpCount + " res1: " + res1 + " res2: " + res2 + " r: " + result);
             }
             return result;
         }
@@ -5772,7 +6068,7 @@ RankDirectory.prototype = {
             }
             const ans = x > 0 ? this.data.pos0(rank + 1, x) : rank;
             if (config1.debug) {
-                console.log("ans: " + ans + " " + rank + ":r, x: " + x + " " + sectionPos + ":s " + this.l1Bits + ": l1");
+                console.log("ans:", ans, rank, ":r, x:", x, "s:", sectionPos);
             }
             return ans;
         }
@@ -5855,7 +6151,7 @@ Tags.prototype = {
             mask = mask >>> 1;
         }
         if (tagIndices.length !== flags.length - 1) {
-            console.log(tagIndices, flags, "flags and header mismatch (bug in upsert?)");
+            console.log(tagIndices, flags, "flags/header mismatch (upsert bug?)");
             return values;
         }
         for(let i7 = 0; i7 < flags.length; i7++){
@@ -5866,7 +6162,7 @@ Tags.prototype = {
                 if ((flag & mask) === mask) {
                     const pos = index * 16 + j;
                     if (config1.debug) {
-                        console.log("pos", pos, "index/tagIndices", index, tagIndices, "j/i", j, i7);
+                        console.log("pos", pos, "i/ti", index, tagIndices, "j/i", j, i7);
                     }
                     values.push(this.rflags[pos]);
                 }
@@ -5934,12 +6230,13 @@ function FrozenTrieNode(trie, index) {
             let i9 = 0;
             let j = 0;
             if (config1.debug) {
-                console.log("thisnode: index/vc/ccount ", this.index, this.letter(), this.childCount());
+                console.log("cur:i/l/c", this.index, this.letter(), this.childCount());
             }
             while(i9 < this.childCount()){
                 const valueChain = this.getChild(i9);
                 if (config1.debug) {
-                    console.log("vc no-flag end vlet/vflag/vindex/val ", i9, valueChain.letter(), valueChain.flag(), valueChain.index, value);
+                    console.log("vc no-flag end i/l", i9, valueChain.letter());
+                    console.log("f/idx/v", valueChain.flag(), valueChain.index, value);
                 }
                 if (!valueChain.flag()) {
                     break;
@@ -5957,7 +6254,9 @@ function FrozenTrieNode(trie, index) {
         return valCached;
     };
     if (config1.debug) {
-        console.log(index + " :i, fc: " + this.firstChild() + " tl: " + this.letter() + " c: " + this.compressed() + " f: " + this.final() + " wh: " + this.where() + " flag: " + this.flag());
+        console.log(index, ":i, fc:", this.firstChild(), "tl:", this.letter());
+        console.log("c:", this.compressed(), "f:", this.final());
+        console.log("wh:", this.where(), "flag:", this.flag());
     }
 }
 FrozenTrieNode.prototype = {
@@ -5978,9 +6277,15 @@ FrozenTrie.prototype = {
         this.extraBit = 1;
         this.bitslen = 9 + this.extraBit;
         this.letterStart = nodeCount * 2 + 1;
+        this.nodecache = new TrieCache();
     },
     getNodeByIndex: function(index) {
-        return new FrozenTrieNode(this, index);
+        let ftnode = this.nodecache.get(index);
+        if (emptyObj(ftnode)) {
+            ftnode = new FrozenTrieNode(this, index);
+            this.nodecache.put(index, ftnode);
+        }
+        return ftnode;
     },
     getRoot: function() {
         return this.getNodeByIndex(0);
@@ -6136,11 +6441,11 @@ function customTagToFlag(fl, blocklistFileTag) {
     let res = chr16(0);
     for (const flag of fl){
         const val = blocklistFileTag[flag].value;
-        const header = 0;
+        const header2 = 0;
         const index = val / 16 | 0;
         const pos = val % 16;
         let h = 0;
-        h = dec16(res[header]);
+        h = dec16(res[header2]);
         const dataIndex = countSetBits(h & BitString.MaskBottom[16][16 - index]) + 1;
         let n = (h >>> 15 - index & 1) !== 1 ? 0 : dec16(res[dataIndex]);
         const upsertData = n !== 0;
@@ -6150,7 +6455,7 @@ function customTagToFlag(fl, blocklistFileTag) {
     }
     return res;
 }
-function createBlocklistFilter(tdbuf, rdbuf, blocklistFileTag, blocklistBasicConfig) {
+function createTrie(tdbuf, rdbuf, blocklistFileTag, blocklistBasicConfig) {
     initialize();
     const tag = {};
     const fl = [];
@@ -6171,343 +6476,6 @@ function createBlocklistFilter(tdbuf, rdbuf, blocklistFileTag, blocklistBasicCon
         t: tags,
         ft: frozentrie
     };
-}
-const minlives = 1;
-const maxlives = 2 ** 14;
-const mincap = 2 ** 5;
-const maxcap = 2 ** 32;
-const minslots = 2;
-class Clock {
-    constructor(cap, slotsperhand = 256, maxlife = 16){
-        cap = this.bound(cap, mincap, maxcap);
-        this.capacity = 2 ** Math.round(Math.log2(cap));
-        this.rb = new Array(this.capacity);
-        this.rb.fill(null);
-        this.store = new Map();
-        this.maxcount = this.bound(maxlife, minlives, maxlives);
-        this.totalhands = Math.max(minslots, Math.round(this.capacity / slotsperhand));
-        this.hands = new Array(this.totalhands);
-        for(let i26 = 0; i26 < this.totalhands; i26++)this.hands[i26] = i26;
-    }
-    next(i27) {
-        const n = i27 + this.totalhands;
-        return (this.capacity + n) % this.capacity;
-    }
-    cur(i28) {
-        return (this.capacity + i28) % this.capacity;
-    }
-    prev(i29) {
-        const p = i29 - this.totalhands;
-        return (this.capacity + p) % this.capacity;
-    }
-    bound(i30, min, max) {
-        i30 = i30 < min ? min : i30;
-        i30 = i30 > max ? max - 1 : i30;
-        return i30;
-    }
-    head(n) {
-        n = this.bound(n, 0, this.totalhands);
-        const h = this.hands[n];
-        return this.cur(h);
-    }
-    incrHead(n) {
-        n = this.bound(n, 0, this.totalhands);
-        this.hands[n] = this.next(this.hands[n]);
-        return this.hands[n];
-    }
-    decrHead(n) {
-        n = this.bound(n, 0, this.totalhands);
-        this.hands[n] = this.prev(this.hands[n]);
-        return this.hands[n];
-    }
-    get size() {
-        return this.store.size;
-    }
-    evict(n, c) {
-        logd("evict start, head/num/size", this.head(n), n, this.size);
-        const start = this.head(n);
-        let h = start;
-        do {
-            const entry = this.rb[h];
-            if (entry === null) return true;
-            entry.count -= c;
-            if (entry.count <= 0) {
-                logd("evict", h, entry);
-                this.store.delete(entry.key);
-                this.rb[h] = null;
-                return true;
-            }
-            h = this.incrHead(n);
-        }while (h !== start)
-        return false;
-    }
-    put(k, v, c = 1) {
-        const cached = this.store.get(k);
-        if (cached) {
-            cached.value = v;
-            const at = this.rb[cached.pos];
-            at.count = Math.min(at.count + c, this.maxcount);
-            return true;
-        }
-        const num = this.rolldice;
-        this.evict(num, c);
-        const h = this.head(num);
-        const hasSlot = this.rb[h] === null;
-        if (!hasSlot) return false;
-        const ringv = {
-            key: k,
-            count: Math.min(c, this.maxcount)
-        };
-        const storev = {
-            value: v,
-            pos: h
-        };
-        this.rb[h] = ringv;
-        this.store.set(k, storev);
-        this.incrHead(num);
-        return true;
-    }
-    val(k, c = 1) {
-        const r = this.store.get(k);
-        if (!r) return null;
-        const at = this.rb[r.pos];
-        at.count = Math.min(at.count + c, this.maxcount);
-        return r.value;
-    }
-    get rolldice() {
-        const max = this.totalhands;
-        return Math.floor(Math.random() * (max - 0)) + 0;
-    }
-}
-function logd() {}
-class LfuCache {
-    constructor(id, capacity){
-        this.id = id;
-        this.cache = new Clock(capacity);
-    }
-    Get(key) {
-        let val = false;
-        try {
-            val = this.cache.val(key) || false;
-        } catch (e) {
-            console.log("Error: " + this.id + " -> Get");
-            console.log(e.stack);
-        }
-        return val;
-    }
-    Put(key, val) {
-        try {
-            this.cache.put(key, val);
-        } catch (e) {
-            console.log("Error: " + this.id + " -> Put");
-            console.log(e.stack);
-        }
-    }
-}
-class UserCache {
-    constructor(size){
-        const name11 = "UserCache";
-        this.localCache = new LfuCache(name11, size);
-        this.log = log.withTags(name11);
-    }
-    get(key) {
-        return this.localCache.Get(key);
-    }
-    put(key, data) {
-        try {
-            this.localCache.Put(key, data);
-        } catch (e) {
-            this.log.e("put", e);
-        }
-    }
-}
-class DomainNameCache {
-    constructor(size){
-        const name12 = "DomainNameCache";
-        this.localCache = new LfuCache(name12, size);
-        this.log = log.withTags(name12);
-    }
-    get(key) {
-        return this.localCache.Get(key);
-    }
-    put(key, data) {
-        try {
-            this.localCache.Put(key, data);
-        } catch (e) {
-            this.log.e("put", e);
-        }
-    }
-}
-class CacheApi {
-    constructor(){
-        this.noop = !isWorkers();
-        if (this.noop) {
-            log.w("not workers, no-op http-cache-api");
-        }
-    }
-    async get(url) {
-        if (this.noop) return false;
-        if (emptyString(url)) return false;
-        return await caches.default.match(url);
-    }
-    put(url, response) {
-        if (this.noop) return false;
-        if (emptyString(url) || emptyObj(response)) return false;
-        return caches.default.put(url, response);
-    }
-}
-const ttlGraceSec = 30;
-function newCacheFilter(blf, domains) {
-    const cf = {};
-    if (emptyArray(domains)) return cf;
-    for (const d of domains){
-        cf[d] = objOf(blf.getDomainInfo(d).searchResult);
-    }
-    return cf;
-}
-function isCacheable(dnsPacket) {
-    if (!rcodeNoError(dnsPacket)) return false;
-    if (!hasAnswers(dnsPacket)) return false;
-    return true;
-}
-function determineCacheExpiry(dnsPacket) {
-    if (!hasAnswers(dnsPacket)) return 0;
-    let minttl = 1 << 30;
-    for (const a of dnsPacket.answers){
-        minttl = Math.min(a.ttl || minttl, minttl);
-    }
-    if (minttl === 1 << 30) return 0;
-    minttl = Math.max(minttl + ttlGraceSec, ttlGraceSec);
-    const expiry = Date.now() + minttl * 1000;
-    return expiry;
-}
-function makeCacheMetadata(dnsPacket, blf) {
-    const domains = extractDomains(dnsPacket);
-    const cf = newCacheFilter(blf, domains);
-    const ttl = determineCacheExpiry(dnsPacket);
-    return {
-        ttlEndTime: ttl,
-        bodyUsed: hasAnswers(dnsPacket),
-        cacheFilter: cf
-    };
-}
-function createCacheInput(dnsPacket, blf) {
-    return {
-        dnsPacket: dnsPacket,
-        metaData: makeCacheMetadata(dnsPacket, blf)
-    };
-}
-function updateTtl(decodedDnsPacket, end) {
-    const now = Date.now();
-    const outttl = Math.max(Math.floor((end - now) / 1000) - 30, 30);
-    for (const a of decodedDnsPacket.answers){
-        if (!optAnswer(a)) a.ttl = outttl;
-    }
-}
-function cacheKey(packet) {
-    if (!hasSingleQuestion(packet)) return null;
-    const name13 = normalizeName(packet.questions[0].name);
-    const type = packet.questions[0].type;
-    return name13 + ":" + type;
-}
-function updateQueryId(decodedDnsPacket, queryId) {
-    if (queryId === decodedDnsPacket.id) return false;
-    decodedDnsPacket.id = queryId;
-    return true;
-}
-function isValueValid(v) {
-    if (emptyObj(v)) return false;
-    return hasMetadata(v.metaData);
-}
-function hasMetadata(m) {
-    return !emptyObj(m);
-}
-function hasAnswer(v) {
-    if (!hasMetadata(v.metaData)) return false;
-    return isAnswerFresh(v.metaData);
-}
-function isAnswerFresh(m) {
-    return m.bodyUsed && m.ttlEndTime > 0 && Date.now() <= m.ttlEndTime;
-}
-class DnsCache {
-    constructor(size){
-        this.localCache = new LfuCache("DnsCache", size);
-        this.cacheApi = new CacheApi();
-        this.log = log.withTags("DnsCache");
-    }
-    async get(key, url) {
-        let entry = this.fromLocalCache(key);
-        if (entry) {
-            return entry;
-        }
-        if (!url || !isWorkers()) return false;
-        const hKey = makeHttpCacheApiKey(key, url);
-        entry = await this.fromHttpCacheApi(hKey);
-        this.putLocalCache(key, entry);
-        return entry;
-    }
-    put(key, data, url, buf, event) {
-        if (!key) return;
-        try {
-            this.putLocalCache(key, data);
-            if (url && isWorkers() && event && event.waitUntil) {
-                this.log.d("put data httpCache", data);
-                event.waitUntil(this.putCacheApi(key, url, buf, data.metaData));
-            }
-        } catch (e) {
-            this.log.e("put", e);
-        }
-    }
-    putLocalCache(key, data) {
-        if (!key || !data) return;
-        try {
-            this.localCache.Put(key, data);
-        } catch (e) {
-            this.log.e("putLocalCache", e);
-        }
-    }
-    fromLocalCache(key) {
-        if (!key) return false;
-        const v = this.localCache.Get(key);
-        return isValueValid(v) ? v : false;
-    }
-    async fromHttpCacheApi(key) {
-        if (!key) return false;
-        const cres = await this.cacheApi.get(key);
-        return this.parseHttpCacheApiResponse(cres);
-    }
-    async putCacheApi(key, url, buf, metaData) {
-        const k = makeHttpCacheApiKey(key, url);
-        const v = makeHttpCacheApiValue(buf, metaData);
-        if (!k || !v) return;
-        this.cacheApi.put(k, v);
-    }
-    async parseHttpCacheApiResponse(response) {
-        if (!response) return false;
-        const metaData = JSON.parse(response.headers.get("x-rethink-metadata"));
-        this.log.d("httpCache response metadata", metaData);
-        if (!hasMetadata(metaData)) {
-            return false;
-        }
-        const p = isAnswerFresh(metaData) ? decode3(await response.arrayBuffer()) : {};
-        const m = metaData;
-        return {
-            dnsPacket: p,
-            metaData: m
-        };
-    }
-}
-function makeHttpCacheApiValue(buf, metaData) {
-    const headers = {
-        headers: concatHeaders({
-            "x-rethink-metadata": JSON.stringify(metaData),
-            "Cache-Control": "max-age=604800"
-        }, contentLengthHeader(buf))
-    };
-    return new Response(buf, headers);
-}
-function makeHttpCacheApiKey(key, url) {
-    return new URL(new URL(url).origin + "/" + env.latestTimestamp + "/" + key);
 }
 const ALPHA32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 function readChar(chr) {
@@ -6547,104 +6515,142 @@ const _wildcardUint16 = new Uint16Array([
     128,
     16320, 
 ]);
-function wildcards() {
-    return _wildcardUint16;
-}
 function isBlocklistFilterSetup(blf) {
-    return blf && blf.t && blf.ft;
+    return blf && !emptyObj(blf.t) && !emptyObj(blf.ft);
 }
-function doBlock(blf, userBlInfo, dn, cf) {
-    const blocklistMap = getBlocklistStampForDomains(dn, blf, cf);
-    if (!blocklistMap) return false;
-    const dnUint = blocklistMap.get(dn);
-    if (!dnUint) return false;
-    const r = checkFlagIntersection(userBlInfo.userBlocklistFlagUint, dnUint, userBlInfo.flagVersion);
-    if (!emptyObj(r) && r.isBlocked) return r;
-    if (!userBlInfo.userServiceListUint) return r;
-    return checkWildcardBlocking(userBlInfo.userServiceListUint, userBlInfo.flagVersion, blocklistMap, dn);
-}
-function getBlocklistStampForDomains(domain, blf, cf) {
-    if (emptyString(domain)) return false;
-    if (!emptyObj(cf) && cf.hasOwnProperty(domain)) {
-        return mapOf(cf[domain]);
+function dnsResponse(packet = null, raw = null, stamps = null) {
+    if (emptyObj(packet) || emptyBuf(raw)) {
+        throw new Error("empty packet for dns-res");
     }
-    if (!emptyObj(blf) && isBlocklistFilterSetup(blf)) {
-        return blf.getDomainInfo(domain).searchResult;
-    }
-    return false;
+    return {
+        isBlocked: false,
+        flag: "",
+        dnsPacket: packet,
+        dnsBuffer: raw,
+        stamps: stamps || {}
+    };
 }
-function checkWildcardBlocking(uint1, flagVersion, blocklistMap, dn) {
+function copyOnlyBlockProperties(to, from) {
+    to.isBlocked = from.isBlocked;
+    to.flag = from.flag;
+    return to;
+}
+function rdnsNoBlockResponse(flag = "", packet = null, raw = null, stamps = null) {
+    return {
+        isBlocked: false,
+        flag: flag || "",
+        dnsPacket: packet,
+        dnsBuffer: raw,
+        stamps: stamps || {}
+    };
+}
+function rdnsBlockResponse(flag, packet = null, raw = null, stamps = null) {
+    if (emptyString(flag)) {
+        throw new Error("no flag set for block-res");
+    }
+    return {
+        isBlocked: true,
+        flag: flag,
+        dnsPacket: packet,
+        dnsBuffer: raw,
+        stamps: stamps || {}
+    };
+}
+function doBlock(dn, userBlInfo, dnBlInfo) {
+    const noblock = rdnsNoBlockResponse();
+    if (emptyString(dn) || emptyObj(dnBlInfo) || emptyObj(userBlInfo)) {
+        return noblock;
+    }
+    const dnUint = new Uint16Array(dnBlInfo[dn]);
+    if (emptyArray(dnUint)) return noblock;
+    const r = applyBlocklists(userBlInfo.userBlocklistFlagUint, dnUint, userBlInfo.flagVersion);
+    if (r.isBlocked) return r;
+    if (emptyArray(userBlInfo.userServiceListUint)) return r;
+    return applyWildcardBlocklists(userBlInfo.userServiceListUint, userBlInfo.flagVersion, dnBlInfo, dn);
+}
+function blockstampFromCache(cr) {
+    const p = cr.dnsPacket;
+    const m = cr.metadata;
+    if (emptyObj(p) || emptyObj(m)) return false;
+    return m.stamps;
+}
+function blockstampFromBlocklistFilter(dnsPacket, blocklistFilter) {
+    if (emptyObj(dnsPacket)) return false;
+    if (!isBlocklistFilterSetup(blocklistFilter)) return false;
+    const domains = extractDomains(dnsPacket);
+    if (emptyArray(domains)) return false;
+    const m = new Map();
+    for (const n of domains){
+        const stamp = blocklistFilter.blockstamp(n);
+        if (emptyMap(stamp)) continue;
+        for (const [k, v] of stamp)m.set(k, v);
+    }
+    return emptyMap(m) ? false : objOf(m);
+}
+function applyWildcardBlocklists(uint1, flagVersion, dnBlInfo, dn) {
     const dnSplit = dn.split(".");
     while(dnSplit.shift() !== undefined){
         const subdomain = dnSplit.join(".");
-        const subdomainUint = blocklistMap.get(subdomain);
-        if (!subdomainUint) continue;
-        const response = checkFlagIntersection(uint1, subdomainUint, flagVersion);
+        const subdomainUint = dnBlInfo[subdomain];
+        if (emptyArray(subdomainUint)) continue;
+        const response = applyBlocklists(uint1, subdomainUint, flagVersion);
         if (!emptyObj(response) && response.isBlocked) {
             return response;
         }
     }
-    return false;
+    return rdnsNoBlockResponse();
 }
-function checkFlagIntersection(uint1, uint2, flagVersion) {
-    const response = {
-        isBlocked: false,
-        blockedB64Flag: ""
-    };
-    const blockedUint = flagIntersection(uint1, uint2);
+function applyBlocklists(uint1, uint2, flagVersion) {
+    const blockedUint = intersect(uint1, uint2);
     if (blockedUint) {
-        response.isBlocked = true;
-        response.blockedB64Flag = getB64Flag1(blockedUint, flagVersion);
+        return rdnsBlockResponse(getB64Flag(blockedUint, flagVersion));
     } else {
-        response.isBlocked = false;
-        response.blockedB64Flag = getB64Flag1(uint2, flagVersion);
+        return rdnsNoBlockResponse(getB64Flag(uint2, flagVersion));
     }
-    return response;
 }
-function flagIntersection(flag1, flag2) {
-    if (emptyString(flag1) || emptyString(flag2)) return false;
-    let flag1Header = flag1[0];
-    let flag2Header = flag2[0];
-    let intersectHeader = flag1Header & flag2Header;
-    if (intersectHeader === 0) {
-        return false;
+function intersect(flag1, flag2) {
+    if (emptyArray(flag1) || emptyArray(flag2)) return null;
+    let header1 = flag1[0];
+    let header2 = flag2[0];
+    let commonHeader = header1 & header2;
+    if (commonHeader === 0) {
+        return null;
     }
-    let flag1Length = flag1.length - 1;
-    let flag2Length = flag2.length - 1;
-    const intersectBody = [];
-    let tmpIntersectHeader = intersectHeader;
-    let maskHeaderForBodyEmpty = 1;
-    for(; tmpIntersectHeader !== 0;){
-        if ((tmpIntersectHeader & 1) === 1) {
-            const tmpBodyIntersect = flag1[flag1Length] & flag2[flag2Length];
-            if (tmpBodyIntersect === 0) {
-                intersectHeader = intersectHeader ^ maskHeaderForBodyEmpty;
+    let i32 = flag1.length - 1;
+    let j = flag2.length - 1;
+    let h = commonHeader;
+    let pos = 0;
+    const commonBody = [];
+    while(h !== 0){
+        if (i32 < 0 || j < 0) throw new Error("blockstamp header/body mismatch");
+        if ((h & 1) === 1) {
+            const commonFlags = flag1[i32] & flag2[j];
+            if (commonFlags === 0) {
+                commonHeader = clearbit(commonHeader, pos);
             } else {
-                intersectBody.push(tmpBodyIntersect);
+                commonBody.push(commonFlags);
             }
         }
-        if ((flag1Header & 1) === 1) {
-            flag1Length -= 1;
+        if ((header1 & 1) === 1) {
+            i32 -= 1;
         }
-        if ((flag2Header & 1) === 1) {
-            flag2Length -= 1;
+        if ((header2 & 1) === 1) {
+            j -= 1;
         }
-        flag1Header >>>= 1;
-        flag2Header >>>= 1;
-        tmpIntersectHeader >>>= 1;
-        maskHeaderForBodyEmpty <<= 1;
+        header1 >>>= 1;
+        header2 >>>= 1;
+        h >>>= 1;
+        pos += 1;
     }
-    if (intersectHeader === 0) {
-        return false;
+    if (commonHeader === 0) {
+        return null;
     }
-    const out = new Uint16Array(1 + intersectBody.length);
-    out.set([
-        intersectHeader
-    ], 0);
-    out.set(intersectBody, 1);
-    return out;
+    return Uint16Array.of(commonHeader, ...commonBody.reverse());
 }
-function getB64Flag1(uint16Arr, flagVersion) {
+function clearbit(uint, pos) {
+    return uint & ~(1 << pos);
+}
+function getB64Flag(uint16Arr, flagVersion) {
     if (emptyArray(uint16Arr)) return "";
     const b64url = bytesToBase64Url(uint16Arr.buffer);
     if (flagVersion === "0") {
@@ -6683,17 +6689,16 @@ function isB32Stamp(s) {
     return s.indexOf(_b32delim) > 0;
 }
 function stampVersion(s) {
-    if (s && s.length > 1) return s[0];
+    if (!emptyArray(s)) return s[0];
     else return "0";
 }
 function unstamp(flag) {
-    const response = {
-        userBlocklistFlagUint: "",
-        flagVersion: "0"
+    const r = {
+        userBlocklistFlagUint: null,
+        flagVersion: "0",
+        userServiceListUint: null
     };
-    if (emptyString(flag)) {
-        return response;
-    }
+    if (emptyString(flag)) return r;
     flag = flag.trim();
     const isFlagB32 = isB32Stamp(flag);
     const s = flag.split(isFlagB32 ? _b32delim : _b64delim);
@@ -6710,12 +6715,13 @@ function unstamp(flag) {
     } else {
         throw new Error("unknown blocklist stamp version in " + s);
     }
-    response.flagVersion = v;
-    response.userBlocklistFlagUint = convertor(f) || "";
-    return response;
+    r.flagVersion = v;
+    r.userBlocklistFlagUint = convertor(f) || null;
+    r.userServiceListUint = intersect(r.userBlocklistFlagUint, _wildcardUint16);
+    return r;
 }
 function hasBlockstamp(blockInfo) {
-    return !emptyObj(blockInfo) && !emptyString(blockInfo.userBlocklistFlagUint);
+    return !emptyObj(blockInfo) && !emptyArray(blockInfo.userBlocklistFlagUint);
 }
 class BlocklistFilter {
     constructor(){
@@ -6723,28 +6729,19 @@ class BlocklistFilter {
         this.ft = null;
         this.blocklistBasicConfig = null;
         this.blocklistFileTag = null;
-        this.domainNameCache = null;
         this.enc = new TextEncoder();
     }
-    loadFilter(t, ft, blocklistBasicConfig, blocklistFileTag) {
+    load(t, ft, blocklistBasicConfig, blocklistFileTag) {
         this.t = t;
         this.ft = ft;
         this.blocklistBasicConfig = blocklistBasicConfig;
         this.blocklistFileTag = blocklistFileTag;
-        this.domainNameCache = new DomainNameCache(cacheSize());
     }
-    getDomainInfo(domainName) {
-        domainName = normalizeName(domainName);
-        let domainNameInfo = this.domainNameCache.get(domainName);
-        if (!domainNameInfo) {
-            domainNameInfo = {
-                searchResult: this.hadDomainName(domainName)
-            };
-            this.domainNameCache.put(domainName, domainNameInfo);
-        }
-        return domainNameInfo;
+    blockstamp(domainName) {
+        const n = normalizeName(domainName);
+        return this.lookup(n);
     }
-    hadDomainName(n) {
+    lookup(n) {
         return this.ft.lookup(this.reverseUtf8(n));
     }
     reverseUtf8(s) {
@@ -6753,11 +6750,8 @@ class BlocklistFilter {
     getTag(uintFlag) {
         return this.t.flagsToTag(uintFlag);
     }
-    customTagToFlag(tagList) {
-        return customTagToFlag(tagList, this.blocklistFileTag);
-    }
     getB64FlagFromTag(tagList, flagVersion) {
-        const uintFlag = this.customTagToFlag(tagList);
+        const uintFlag = customTagToFlag(tagList, this.blocklistFileTag);
         return getB64Flag(uintFlag, flagVersion);
     }
 }
@@ -6767,65 +6761,72 @@ class BlocklistWrapper {
         this.td = null;
         this.rd = null;
         this.ft = null;
-        this.startTime = 0;
+        this.startTime = Date.now();
         this.isBlocklistUnderConstruction = false;
         this.exceptionFrom = "";
         this.exceptionStack = "";
         this.log = log.withTags("BlocklistWrapper");
     }
-    async RethinkModule(param) {
-        let response = emptyResponse();
+    async init(rxid) {
         if (this.isBlocklistFilterSetup()) {
-            response.data.blocklistFilter = this.blocklistFilter;
-            return response;
+            const blres = emptyResponse();
+            blres.data.blocklistFilter = this.blocklistFilter;
+            return blres;
         }
         try {
             const now = Date.now();
-            if (!this.isBlocklistUnderConstruction || now - this.startTime > param.workerTimeout * 2) {
-                this.log.i(param.rxid, "download blocklists", now, this.startTime);
-                return await this.initBlocklistConstruction(param.rxid, now, param.blocklistUrl, param.latestTimestamp, param.tdNodecount, param.tdParts);
+            if (!this.isBlocklistUnderConstruction || now - this.startTime > downloadTimeout() * 2) {
+                this.log.i(rxid, "download blocklists", now, this.startTime);
+                return this.initBlocklistConstruction(rxid, now, blocklistUrl(), timestamp(), tdNodeCount(), tdParts());
             } else {
-                let totalWaitms = 0;
-                const waitms = 50;
-                while(totalWaitms < param.fetchTimeout){
-                    if (this.isBlocklistFilterSetup()) {
-                        response.data.blocklistFilter = this.blocklistFilter;
-                        return response;
-                    }
-                    await sleep(50);
-                    totalWaitms += waitms;
-                }
-                response.isException = true;
-                response.exceptionStack = this.exceptionStack || "download timeout";
-                response.exceptionFrom = this.exceptionFrom || "blocklistWrapper.js";
+                return this.waitUntilDone();
             }
         } catch (e) {
-            this.log.e(param.rxid, "main", e);
-            response = errResponse("blocklistWrapper", e);
+            this.log.e(rxid, "main", e.stack);
+            return errResponse("blocklistWrapper", e);
         }
-        return response;
+    }
+    getBlocklistFilter() {
+        return this.blocklistFilter;
     }
     isBlocklistFilterSetup() {
-        return !emptyObj(this.blocklistFilter) && this.blocklistFilter.t;
+        return isBlocklistFilterSetup(this.blocklistFilter);
     }
-    initBlocklistFilterConstruction(td, rd, ft, config2) {
+    async waitUntilDone() {
+        let totalWaitms = 0;
+        const waitms = 25;
+        const response = emptyResponse();
+        while(totalWaitms < downloadTimeout()){
+            if (this.isBlocklistFilterSetup()) {
+                response.data.blocklistFilter = this.blocklistFilter;
+                return response;
+            }
+            await sleep(25);
+            totalWaitms += waitms;
+        }
+        response.isException = true;
+        response.exceptionStack = this.exceptionStack || "download timeout";
+        response.exceptionFrom = this.exceptionFrom || "blocklistWrapper.js";
+        return response;
+    }
+    initBlocklistFilterConstruction(td, rd, ftags, bconfig) {
         this.isBlocklistUnderConstruction = true;
         this.startTime = Date.now();
-        const filter = createBlocklistFilter(td, rd, ft, config2);
-        this.blocklistFilter.loadFilter(filter.t, filter.ft, filter.blocklistBasicConfig, filter.blocklistFileTag);
+        const filter = createTrie(td, rd, ftags, bconfig);
+        this.blocklistFilter.load(filter.t, filter.ft, bconfig, ftags);
         this.isBlocklistUnderConstruction = false;
     }
-    async initBlocklistConstruction(rxid, when1, blocklistUrl, latestTimestamp, tdNodecount, tdParts) {
+    async initBlocklistConstruction(rxid, when1, blocklistUrl1, latestTimestamp, tdNodecount, tdParts1) {
         this.isBlocklistUnderConstruction = true;
         this.startTime = when1;
         let response = emptyResponse();
         try {
-            const bl = await this.downloadBuildBlocklist(rxid, blocklistUrl, latestTimestamp, tdNodecount, tdParts);
-            this.blocklistFilter.loadFilter(bl.t, bl.ft, bl.blocklistBasicConfig, bl.blocklistFileTag);
+            const bl = await this.downloadBuildBlocklist(rxid, blocklistUrl1, latestTimestamp, tdNodecount, tdParts1);
+            this.blocklistFilter.load(bl.t, bl.ft, bl.blocklistBasicConfig, bl.blocklistFileTag);
             this.log.i(rxid, "blocklist-filter setup");
             response.data.blocklistFilter = this.blocklistFilter;
         } catch (e) {
-            this.log.e(rxid, "initBlocklistConstruction", e);
+            this.log.e(rxid, "initBlocklistConstruction", e.stack);
             response = errResponse("initBlocklistConstruction", e);
             this.exceptionFrom = response.exceptionFrom;
             this.exceptionStack = response.exceptionStack;
@@ -6833,15 +6834,15 @@ class BlocklistWrapper {
         this.isBlocklistUnderConstruction = false;
         return response;
     }
-    async downloadBuildBlocklist(rxid, blocklistUrl, latestTimestamp, tdNodecount, tdParts) {
+    async downloadBuildBlocklist(rxid, blocklistUrl2, latestTimestamp, tdNodecount, tdParts2) {
         !tdNodecount && this.log.e(rxid, "tdNodecount zero or missing!");
         const resp = {};
-        const baseurl = blocklistUrl + latestTimestamp;
+        const baseurl = blocklistUrl2 + latestTimestamp;
         const blocklistBasicConfig = {
             nodecount: tdNodecount || -1,
-            tdparts: tdParts || -1
+            tdparts: tdParts2 || -1
         };
-        this.log.d(rxid, blocklistUrl, latestTimestamp, tdNodecount, tdParts);
+        this.log.d(rxid, blocklistUrl2, latestTimestamp, tdNodecount, tdParts2);
         const buf0 = fileFetch(baseurl + "/filetag.json", "json");
         const buf1 = makeTd(baseurl, blocklistBasicConfig.tdparts);
         const buf2 = fileFetch(baseurl + "/rd.txt", "buffer");
@@ -6854,7 +6855,7 @@ class BlocklistWrapper {
         this.td = downloads[1];
         this.rd = downloads[2];
         this.ft = downloads[0];
-        const trie = createBlocklistFilter(this.td, this.rd, this.ft, blocklistBasicConfig);
+        const trie = createTrie(this.td, this.rd, this.ft, blocklistBasicConfig);
         resp.t = trie.t;
         resp.ft = trie.ft;
         resp.blocklistBasicConfig = blocklistBasicConfig;
@@ -6867,14 +6868,14 @@ async function fileFetch(url, typ) {
         log.i("fetch fail", typ, url);
         throw new Error("Unknown conversion type at fileFetch");
     }
-    log.i("downloading", url);
+    log.i("downloading", url, typ);
     const res = await fetch(url, {
         cf: {
             cacheTtl: 1209600
         }
     });
     if (!res.ok) {
-        log.e(url, res);
+        log.e("file-fetch err", url, res);
         throw new Error(JSON.stringify([
             url,
             res,
@@ -6887,24 +6888,14 @@ async function fileFetch(url, typ) {
         return await res.json();
     }
 }
-const sleep = (ms)=>{
-    return new Promise((resolve, reject)=>{
-        try {
-            setTimeout(resolve, ms);
-        } catch (e) {
-            log.e("dns-resolver sleep timeout", e);
-            reject(e);
-        }
-    });
-};
 async function makeTd(baseurl, n) {
     log.i("makeTd from tdParts", n);
     if (n <= -1) {
         return fileFetch(baseurl + "/td.txt", "buffer");
     }
     const tdpromises = [];
-    for(let i32 = 0; i32 <= n; i32++){
-        const f = baseurl + "/td" + i32.toLocaleString("en-US", {
+    for(let i33 = 0; i33 <= n; i33++){
+        const f = baseurl + "/td" + i33.toLocaleString("en-US", {
             minimumIntegerDigits: 2,
             useGrouping: false
         }) + ".txt";
@@ -6912,24 +6903,17 @@ async function makeTd(baseurl, n) {
     }
     const tds = await Promise.all(tdpromises);
     log.i("tds downloaded");
-    return new Promise((resolve, reject)=>{
-        try {
-            resolve(concat(tds));
-        } catch (e) {
-            log.e("reject make-td", e);
-            reject(e.message);
-        }
-    });
+    return concat(tds);
 }
 class CommandControl {
-    constructor(){
-        this.latestTimestamp = "";
+    constructor(blocklistWrapper){
+        this.latestTimestamp = timestamp();
         this.log = log.withTags("CommandControl");
+        this.bw = blocklistWrapper;
     }
     async RethinkModule(param) {
-        this.latestTimestamp = param.latestTimestamp;
         if (isGetRequest(param.request)) {
-            return this.commandOperation(param.rxid, param.request.url, param.blocklistFilter, param.isDnsMsg);
+            return await this.commandOperation(param.rxid, param.request.url, param.isDnsMsg);
         }
         return emptyResponse();
     }
@@ -6950,7 +6934,7 @@ class CommandControl {
         if (p[1]) return p[1];
         return d.length > 1 ? d[0] : emptyFlag;
     }
-    commandOperation(rxid, url, blocklistFilter, isDnsMsg1) {
+    async commandOperation(rxid, url, isDnsMsg1) {
         let response = emptyResponse();
         try {
             const reqUrl = new URL(url);
@@ -6966,14 +6950,18 @@ class CommandControl {
             const command = pathSplit[1];
             const b64UserFlag = this.userFlag(reqUrl, isDnsCmd);
             this.log.d(rxid, "processing...", url, command, b64UserFlag);
+            await this.bw.init();
+            const blf = this.bw.getBlocklistFilter();
+            const isBlfSetup = isBlocklistFilterSetup(blf);
+            if (!isBlfSetup) throw new Error("no blocklist-filter");
             if (command === "listtob64") {
-                response.data.httpResponse = listToB64(queryString, blocklistFilter);
+                response.data.httpResponse = listToB64(queryString, blf);
             } else if (command === "b64tolist") {
-                response.data.httpResponse = b64ToList(queryString, blocklistFilter);
+                response.data.httpResponse = b64ToList(queryString, blf);
             } else if (command === "dntolist") {
-                response.data.httpResponse = domainNameToList(queryString, blocklistFilter, this.latestTimestamp);
+                response.data.httpResponse = domainNameToList(queryString, blf, this.latestTimestamp);
             } else if (command === "dntouint") {
-                response.data.httpResponse = domainNameToUint(queryString, blocklistFilter);
+                response.data.httpResponse = domainNameToUint(queryString, blf);
             } else if (command === "config" || command === "configure" || !isDnsCmd) {
                 response.data.httpResponse = configRedirect(b64UserFlag, reqUrl.origin, this.latestTimestamp, !isDnsCmd);
             } else {
@@ -6981,7 +6969,7 @@ class CommandControl {
                 response.data.httpResponse = respond400();
             }
         } catch (e) {
-            this.log.e(rxid, "err cc:op", e);
+            this.log.e(rxid, "err cc:op", e.stack);
             response = errResponse("cc:op", e);
             response.data.httpResponse = jsonResponse(e.stack);
         }
@@ -6991,9 +6979,9 @@ class CommandControl {
 function isRethinkDns(hostname) {
     return hostname.indexOf("rethinkdns") >= 0;
 }
-function configRedirect(userFlag, origin, timestamp, highlight) {
+function configRedirect(userFlag, origin, timestamp1, highlight) {
     const u = "https://rethinkdns.com/configure";
-    let q = "?tstamp=" + timestamp;
+    let q = "?tstamp=" + timestamp1;
     q += !isRethinkDns(origin) ? "&v=ext&u=" + origin : "";
     q += highlight ? "&s=added" : "";
     q += userFlag ? "#" + userFlag : "";
@@ -7004,11 +6992,11 @@ function domainNameToList(queryString, blocklistFilter, latestTimestamp) {
     const r = {
         domainName: domainName,
         version: latestTimestamp,
-        list: {}
+        list: {},
+        listDetail: {}
     };
-    const searchResult = blocklistFilter.hadDomainName(domainName);
+    const searchResult = blocklistFilter.lookup(domainName);
     if (!searchResult) {
-        r.list = false;
         return jsonResponse(r);
     }
     for (const entry of searchResult){
@@ -7027,9 +7015,8 @@ function domainNameToUint(queryString, blocklistFilter) {
         domainName: domainName,
         list: {}
     };
-    const searchResult = blocklistFilter.hadDomainName(domainName);
+    const searchResult = blocklistFilter.lookup(domainName);
     if (!searchResult) {
-        r.list = false;
         return jsonResponse(r);
     }
     for (const entry of searchResult){
@@ -7053,15 +7040,15 @@ function b64ToList(queryString, blocklistFilter) {
     const b64 = queryString.get("b64") || "";
     const r = {
         command: "Base64 To List",
-        inputB64: b64
+        inputB64: b64,
+        list: [],
+        listDetail: {}
     };
     const stamp = unstamp(b64);
-    if (stamp.userBlocklistFlagUint.length <= 0) {
-        r.list = "Invalid B64 String";
+    if (!hasBlockstamp(stamp)) {
         return jsonResponse(r);
     }
     r.list = blocklistFilter.getTag(stamp.userBlocklistFlagUint);
-    r.listDetail = {};
     for (const listValue of r.list){
         r.listDetail[listValue] = blocklistFilter.blocklistFileTag[listValue];
     }
@@ -7071,6 +7058,23 @@ function jsonResponse(obj) {
     return new Response(JSON.stringify(obj), {
         headers: jsonHeaders()
     });
+}
+class UserCache {
+    constructor(size){
+        const name11 = "UserCache";
+        this.localCache = new LfuCache(name11, size);
+        this.log = log.withTags(name11);
+    }
+    get(key) {
+        return this.localCache.Get(key);
+    }
+    put(key, val) {
+        try {
+            this.localCache.Put(key, val);
+        } catch (e) {
+            this.log.e("put", key, val, e.stack);
+        }
+    }
 }
 const cacheSize1 = 10000;
 class UserOperation {
@@ -7089,20 +7093,14 @@ class UserOperation {
         }
         try {
             const blocklistFlag = blockstampFromUrl(param.request.url);
-            let currentUser = this.userConfigCache.get(blocklistFlag);
-            if (emptyObj(currentUser)) {
-                const r = unstamp(blocklistFlag);
-                const serviceListUint = flagIntersection(r.userBlocklistFlagUint, wildcards());
-                currentUser = {
-                    userBlocklistFlagUint: r.userBlocklistFlagUint,
-                    flagVersion: r.flagVersion,
-                    userServiceListUint: serviceListUint
-                };
-                this.log.d(param.rxid, "new cfg cache kv", blocklistFlag, currentUser);
-                this.userConfigCache.put(blocklistFlag, currentUser);
+            let r = this.userConfigCache.get(blocklistFlag);
+            if (emptyObj(r)) {
+                r = unstamp(blocklistFlag);
+                this.log.d(param.rxid, "new cfg cache kv", blocklistFlag, r);
+                this.userConfigCache.put(blocklistFlag, r);
             }
-            response.data.userBlocklistInfo = currentUser;
-            response.data.dnsResolverUrl = param.dnsResolverUrl;
+            response.data.userBlocklistInfo = r;
+            response.data.dnsResolverUrl = null;
         } catch (e) {
             this.log.e(param.rxid, "loadUser", e);
             response = errResponse("UserOp:loadUser", e);
@@ -7110,113 +7108,181 @@ class UserOperation {
         return response;
     }
 }
-class DNSQuestionBlock {
+class DnsBlocker {
     constructor(){
-        this.log = log.withTags("DnsQuestionBlock");
+        this.log = log.withTags("DnsBlocker");
     }
-    async RethinkModule(param) {
-        let response = emptyResponse();
-        try {
-            response.data = this.dnsBlock(param);
-        } catch (e) {
-            this.log.e(param.rxid, "main", e);
-            response = errResponse("DNSQuestionBlock", e);
-        }
-        return response;
-    }
-    dnsBlock(param) {
-        const response = this.performBlocking(param.rxid, param.userBlocklistInfo, param.requestDecodedDnsPacket, param.blocklistFilter, false);
-        if (response && response.isBlocked) {
-            this.log.d(param.rxid, "cache block-response");
-            putCache(param.dnsCache, param.request.url, param.blocklistFilter, param.requestDecodedDnsPacket, "", param.event);
-        }
-        return response;
-    }
-    performBlocking(rxid, blockInfo, dnsPacket, blf, cf) {
-        if (!cf && !blf) {
-            this.log.w(rxid, "no cf and blf");
-            return false;
+    blockQuestion(rxid, req, blockInfo) {
+        const dnsPacket = req.dnsPacket;
+        const stamps = req.stamps;
+        if (!stamps) {
+            this.log.d(rxid, "q: no stamp");
+            return req;
         }
         if (!hasBlockstamp(blockInfo)) {
-            this.log.d(rxid, "no user-set blockstamp");
-            return false;
+            this.log.d(rxid, "q: no user-set blockstamp");
+            return req;
         }
-        if (!isBlockable(dnsPacket)) {
+        if (!isQueryBlockable(dnsPacket)) {
             this.log.d(rxid, "not a blockable dns-query");
-            return false;
+            return req;
         }
-        const qn = getQueryName(dnsPacket.questions);
-        if (!qn) return false;
-        return doBlock(blf, blockInfo, qn, cf);
+        const domains = extractDomains(dnsPacket);
+        const bres = this.block(domains, blockInfo, stamps);
+        return copyOnlyBlockProperties(req, bres);
     }
-}
-function putCache(cache, url, blf, dnsPacket, buf, event) {
-    const key = cacheKey(dnsPacket);
-    if (!key) return;
-    const value = createCacheInput(dnsPacket, blf);
-    cache.put(key, value, url, buf, event);
-}
-class DNSResponseBlock {
-    constructor(){
-        this.log = log.withTags("DnsResponseBlock");
-    }
-    async RethinkModule(param) {
-        let response = emptyResponse();
-        try {
-            response.data = this.performBlocking(param.rxid, param.userBlocklistInfo, param.responseDecodedDnsPacket, param.blocklistFilter, false);
-            this.putCache(param.rxid, param.dnsCache, param.request.url, param.blocklistFilter, param.responseDecodedDnsPacket, param.responseBodyBuffer, param.event);
-        } catch (e) {
-            this.log.e(param.rxid, "main", e);
-            response = errResponse("DnsResponseBlock", e);
-        }
-        return response;
-    }
-    performBlocking(rxid, blockInfo, dnsPacket, blf, cf) {
-        if (!cf && !blf) {
-            this.log.w(rxid, "no cf and blf");
-            return false;
+    blockAnswer(rxid, res, blockInfo) {
+        const dnsPacket = res.dnsPacket;
+        const stamps = res.stamps;
+        if (!stamps || !hasAnswers(dnsPacket)) {
+            this.log.d(rxid, "ans: no stamp / dns-packet");
+            return res;
         }
         if (!hasBlockstamp(blockInfo)) {
-            this.log.d(rxid, "no user-set blockstamp");
-            return false;
+            this.log.d(rxid, "ans: no user-set blockstamp");
+            return res;
         }
-        if (emptyBuf(dnsPacket)) {
-            this.log.d(rxid, "no dns-packet ans");
-            return false;
-        }
-        if (!isCname(dnsPacket) && !isHttps(dnsPacket)) {
+        if (!isAnswerBlockable(dnsPacket)) {
             this.log.d(rxid, "ans not cloaked with cname/https/svcb");
-            return false;
+            return res;
         }
-        return doResponseBlock(dnsPacket, blf, blockInfo, cf);
+        const domains = extractDomains(dnsPacket);
+        const bres = this.block(domains, blockInfo, stamps);
+        return copyOnlyBlockProperties(res, bres);
     }
-    putCache(rxid, cache, url, blf, dnsPacket, buf, event) {
-        if (emptyBuf(dnsPacket)) return;
-        if (!isCacheable(dnsPacket)) return;
-        const k = cacheKey(dnsPacket);
-        if (!k) return;
-        const v = createCacheInput(dnsPacket, blf);
-        this.log.d(rxid, "put-cache k/v ", k, v);
-        cache.put(k, v, url, buf, event);
+    block(names, blockInfo, blockstamps) {
+        let r = rdnsNoBlockResponse();
+        for (const n of names){
+            r = doBlock(n, blockInfo, blockstamps);
+            if (r.isBlocked) break;
+        }
+        return r;
     }
 }
-function doResponseBlock(dnsPacket, blf, blockInfo, cf) {
-    const names = extractDomains(dnsPacket);
-    let r = false;
-    for (const n of names){
-        r = doBlock(blf, blockInfo, n, cf);
-        if (r.isBlocked) break;
+const minTtlSec = 30;
+const cheader = "x-rdnscache-metadata";
+const _cacheurl = "https://caches.rethinkdns.com/";
+const _cacheHeaderKey = "x-rdns-cache";
+const _cacheHeaderHitValue = "hit";
+const _cacheHeaders = {
+    [_cacheHeaderKey]: _cacheHeaderHitValue
+};
+function determineCacheExpiry(packet) {
+    const someVeryHighTtl = 1 << 30;
+    if (!isAnswer(packet)) return 0;
+    let ttl = someVeryHighTtl;
+    for (const a of packet.answers)ttl = Math.min(a.ttl || minTtlSec, ttl);
+    if (ttl === someVeryHighTtl) ttl = minTtlSec;
+    ttl += cacheTtl();
+    const expiry = Date.now() + ttl * 1000;
+    return expiry;
+}
+function makeCacheMetadata(dnsPacket, stamps) {
+    return {
+        expiry: determineCacheExpiry(dnsPacket),
+        stamps: stamps
+    };
+}
+function makeCacheValue(packet, raw, metadata) {
+    return {
+        dnsPacket: packet,
+        dnsBuffer: raw,
+        metadata: metadata
+    };
+}
+function cacheValueOf(rdnsResponse) {
+    const stamps = rdnsResponse.stamps;
+    const packet = rdnsResponse.dnsPacket;
+    const raw = rdnsResponse.dnsBuffer;
+    const metadata = makeCacheMetadata(packet, stamps);
+    return makeCacheValue(packet, raw, metadata);
+}
+function updateTtl(packet, end) {
+    const now = Date.now();
+    const actualttl = Math.floor((end - now) / 1000) - cacheTtl();
+    const outttl = actualttl < 30 ? rand(30, 180) : actualttl;
+    for (const a of packet.answers){
+        if (!optAnswer(a)) a.ttl = outttl;
     }
-    return r;
+}
+function makeId(packet) {
+    if (!hasSingleQuestion(packet)) return null;
+    const name12 = normalizeName(packet.questions[0].name);
+    const type = packet.questions[0].type;
+    return name12 + ":" + type;
+}
+function makeLocalCacheValue(b, metadata) {
+    return {
+        dnsBuffer: b,
+        metadata: metadata
+    };
+}
+function makeHttpCacheValue(b, metadata) {
+    const headers = {
+        headers: concatHeaders({
+            [cheader]: embedMetadata(metadata),
+            "Cache-Control": "max-age=604800"
+        }, contentLengthHeader(b))
+    };
+    return new Response(b, headers);
+}
+function makeHttpCacheKey(packet) {
+    const id = makeId(packet);
+    if (emptyString(id)) return null;
+    return new URL(_cacheurl + timestamp() + "/" + id);
+}
+function extractMetadata(cres) {
+    return JSON.parse(cres.headers.get(cheader));
+}
+function embedMetadata(m) {
+    return JSON.stringify(m);
+}
+function cacheHeaders() {
+    return _cacheHeaders;
+}
+function hasCacheHeader(h) {
+    if (!h) return false;
+    return h.get(_cacheHeaderKey) === _cacheHeaderHitValue;
+}
+function updateQueryId(decodedDnsPacket, queryId) {
+    if (queryId === decodedDnsPacket.id) return false;
+    decodedDnsPacket.id = queryId;
+    return true;
+}
+function isValueValid(v) {
+    if (emptyObj(v)) return false;
+    return hasMetadata(v.metadata);
+}
+function hasMetadata(m) {
+    return !emptyObj(m);
+}
+function isAnswerFresh(m, n = 0) {
+    const now = Date.now();
+    const ttl = cacheTtl() * 1000;
+    const r = n || rolldice(6);
+    if (r % 6 === 0) {
+        return m.expiry > 0 && now <= m.expiry - ttl;
+    } else {
+        return m.expiry > 0 && now <= m.expiry;
+    }
+}
+function updatedAnswer(dnsPacket, qid, expiry) {
+    updateQueryId(dnsPacket, qid);
+    updateTtl(dnsPacket, expiry);
+    return dnsPacket;
 }
 class DNSResolver {
-    constructor(){
+    constructor(blocklistWrapper, cache){
+        this.cache = cache;
         this.http2 = null;
         this.nodeUtil = null;
         this.transport = null;
+        this.blocker = new DnsBlocker();
+        this.bw = blocklistWrapper;
         this.log = log.withTags("DnsResolver");
     }
     async lazyInit() {
+        if (!hasDynamicImports()) return;
         if (isNode() && !this.http2) {
             this.http2 = await import("http2");
             this.log.i("created custom http2 client");
@@ -7238,62 +7304,163 @@ class DNSResolver {
             response.data = await this.resolveDns(param);
         } catch (e) {
             response = errResponse("dnsResolver", e);
-            this.log.e(param.rxid, "main", e);
+            this.log.e(param.rxid, "main", e.stack);
         }
         return response;
     }
+    determineDohResolvers(preferredByUser) {
+        if (this.transport) return [];
+        if (!this.bw.isBlocklistFilterSetup()) {
+            return [
+                primaryDohResolver()
+            ];
+        }
+        if (!emptyString(preferredByUser)) {
+            return [
+                preferredByUser
+            ];
+        } else {
+            return dohResolvers();
+        }
+    }
     async resolveDns(param) {
         const rxid = param.rxid;
-        const upRes = await this.resolveDnsUpstream(rxid, param.request, param.dnsResolverUrl, param.requestBodyBuffer);
-        return await this.decodeResponse(rxid, upRes);
-    }
-    async decodeResponse(rxid, response) {
-        if (!response) throw new Error("no upstream result");
-        if (!response.ok) {
-            const txt = await response.text();
-            this.log.d(rxid, "!OK", response.status, response.statusText, txt);
-            throw new Error(response.status + " http err: " + response.statusText);
+        const blInfo = param.userBlocklistInfo;
+        const rawpacket = param.requestBodyBuffer;
+        const decodedpacket = param.requestDecodedDnsPacket;
+        const userDns = param.userDnsResolverUrl;
+        const dispatcher = param.dispatcher;
+        const stamps = param.domainBlockstamp;
+        let blf = this.bw.getBlocklistFilter();
+        let isBlfSetup = isBlocklistFilterSetup(blf);
+        const q = await this.makeRdnsResponse(rxid, rawpacket, blf, stamps);
+        this.blocker.blockQuestion(rxid, q, blInfo);
+        this.log.d(rxid, "q block?", q.isBlocked, "blf?", isBlfSetup);
+        if (q.isBlocked) {
+            this.primeCache(rxid, q, dispatcher);
+            return q;
         }
-        const dnsBuffer = await response.arrayBuffer();
-        const dnsPacket = decode3(dnsBuffer);
-        return {
-            dnsPacket: dnsPacket,
-            dnsBuffer: dnsBuffer
-        };
+        const promisedTasks = await Promise.all([
+            this.bw.init(rxid),
+            this.resolveDnsUpstream(rxid, param.request, this.determineDohResolvers(userDns), rawpacket, decodedpacket), 
+        ]);
+        const res = promisedTasks[1];
+        if (!isBlfSetup) {
+            this.log.d(rxid, "blocklist-filter downloaded and setup");
+            blf = this.bw.getBlocklistFilter();
+            isBlfSetup = isBlocklistFilterSetup(blf);
+        }
+        if (!isBlfSetup) throw new Error(rxid + " no blocklist-filter");
+        if (!res) throw new Error(rxid + " no upstream result");
+        if (!res.ok) {
+            const txt = res.text && await res.text();
+            this.log.d(rxid, "!OK", res, txt);
+            throw new Error(txt + " http err: " + res);
+        }
+        const ans = await res.arrayBuffer();
+        const r = await this.makeRdnsResponse(rxid, ans, blf, stamps);
+        this.blocker.blockAnswer(rxid, r, blInfo);
+        const fromCache = hasCacheHeader(res.headers);
+        this.log.d(rxid, "ans block?", r.isBlocked, "from cache?", fromCache);
+        if (!fromCache) {
+            this.primeCache(rxid, r, dispatcher);
+        }
+        return r;
+    }
+    async makeRdnsResponse(rxid, raw, blf, stamps = null) {
+        if (!raw) throw new Error(rxid + " mk-res no upstream result");
+        const dnsPacket = decode3(raw);
+        stamps = emptyObj(stamps) ? blockstampFromBlocklistFilter(dnsPacket, blf) : stamps;
+        return dnsResponse(dnsPacket, raw, stamps);
+    }
+    primeCache(rxid, r, dispatcher) {
+        const blocked = r.isBlocked;
+        const k = makeHttpCacheKey(r.dnsPacket);
+        this.log.d(rxid, "primeCache: block?", blocked, "k", k.href);
+        if (!k) {
+            this.log.d(rxid, "no cache-key, url/query missing?", k, r.stamps);
+            return;
+        }
+        const v = cacheValueOf(r);
+        this.cache.put(k, v, dispatcher);
     }
 }
-DNSResolver.prototype.resolveDnsUpstream = async function(rxid, request, resolverUrl, requestBodyBuffer) {
-    if (this.transport) {
-        const q = bufferOf(requestBodyBuffer);
-        let ans = await this.transport.udpquery(rxid, q);
-        if (ans && truncated(ans)) {
-            this.log.w(rxid, "ans truncated, retrying over tcp");
-            ans = await this.transport.tcpquery(rxid, q);
+DNSResolver.prototype.resolveDnsUpstream = async function(rxid, request, resolverUrls, query, packet) {
+    const promisedPromises = [];
+    if (emptyArray(resolverUrls)) {
+        try {
+            const q = bufferOf(query);
+            let ans = await this.transport.udpquery(rxid, q);
+            if (truncated(ans)) {
+                this.log.w(rxid, "ans truncated, retrying over tcp");
+                ans = await this.transport.tcpquery(rxid, q);
+            }
+            if (ans) {
+                const r = new Response(arrayBufferOf(ans));
+                promisedPromises.push(Promise.resolve(r));
+            } else {
+                promisedPromises.push(Promise.resolve(respond503()));
+            }
+        } catch (e) {
+            this.log.e(rxid, "err when querying plain old dns", e.stack);
+            promisedPromises.push(Promise.reject(e));
         }
-        return ans ? new Response(arrayBufferOf(ans)) : respond503();
+        return Promise.any(promisedPromises);
     }
-    const u = new URL(request.url);
-    const upstream = new URL(resolverUrl);
-    u.hostname = upstream.hostname;
-    u.pathname = upstream.pathname;
-    u.port = upstream.port;
-    u.protocol = upstream.protocol;
-    let newRequest = null;
-    if (isGetRequest(request)) {
-        u.search = "?dns=" + bytesToBase64Url(requestBodyBuffer);
-        newRequest = new Request(u.href, {
-            method: "GET"
-        });
-    } else if (isPostRequest(request)) {
-        newRequest = new Request(u.href, {
-            method: "POST",
-            headers: concatHeaders(contentLengthHeader(requestBodyBuffer), dnsHeaders()),
-            body: requestBodyBuffer
-        });
-    } else {
-        throw new Error("get/post requests only");
+    try {
+        this.log.d(rxid, "upstream cache");
+        promisedPromises.push(this.resolveDnsFromCache(rxid, packet));
+        for (const rurl of resolverUrls){
+            if (emptyString(rurl)) {
+                this.log.w(rxid, "missing resolver url", rurl);
+                continue;
+            }
+            const u = new URL(request.url);
+            const upstream = new URL(rurl);
+            u.hostname = upstream.hostname;
+            u.pathname = upstream.pathname;
+            u.port = upstream.port;
+            u.protocol = upstream.protocol;
+            let dnsreq = null;
+            if (isGetRequest(request)) {
+                u.search = "?dns=" + bytesToBase64Url(query);
+                dnsreq = new Request(u.href, {
+                    method: "GET"
+                });
+            } else if (isPostRequest(request)) {
+                dnsreq = new Request(u.href, {
+                    method: "POST",
+                    headers: concatHeaders(contentLengthHeader(query), dnsHeaders()),
+                    body: query
+                });
+            } else {
+                throw new Error("get/post only");
+            }
+            this.log.d(rxid, "upstream doh2/fetch", u.href);
+            promisedPromises.push(this.http2 ? this.doh2(rxid, dnsreq) : fetch(dnsreq));
+        }
+    } catch (e) {
+        this.log.e(rxid, "err doh2/fetch upstream", e.stack);
+        promisedPromises.push(Promise.reject(e));
     }
-    return this.http2 ? this.doh2(rxid, newRequest) : fetch(newRequest);
+    return Promise.any(promisedPromises);
+};
+DNSResolver.prototype.resolveDnsFromCache = async function(rxid, packet) {
+    const k = makeHttpCacheKey(packet);
+    if (!k) throw new Error("resolver: no cache-key");
+    const cr = await this.cache.get(k);
+    const hasAns = cr && isAnswer(cr.dnsPacket);
+    const freshAns = hasAns && isAnswerFresh(cr.metadata);
+    this.log.d(rxid, "cache ans", k.href, "ans?", hasAns, "fresh?", freshAns);
+    if (!hasAns || !freshAns) {
+        return Promise.reject(new Error("resolver: cache miss"));
+    }
+    updatedAnswer(cr.dnsPacket, packet.id, cr.metadata.expiry);
+    const b = encode3(cr.dnsPacket);
+    const r = new Response(b, {
+        headers: cacheHeaders()
+    });
+    return Promise.resolve(r);
 };
 DNSResolver.prototype.doh2 = async function(rxid, request) {
     if (!this.http2 || !this.nodeUtil) {
@@ -7327,67 +7494,162 @@ DNSResolver.prototype.doh2 = async function(rxid, request) {
                 safeBox(c.close);
                 resolve(new Response(rb, h));
             });
-            req.on("error", (err)=>{
-                reject(err.message);
-            });
+        });
+        req.on("error", (err)=>{
+            reject(err.message);
         });
         req.end(upstreamQuery);
     });
 };
-class DNSCacheResponse {
-    constructor(){
-        this.log = log.withTags("DnsCacheResponse");
+class DNSCacheResponder {
+    constructor(blocklistWrapper, cache){
+        this.blocker = new DnsBlocker();
+        this.log = log.withTags("DnsCacheResponder");
+        this.cache = cache;
+        this.bw = blocklistWrapper;
     }
     async RethinkModule(param) {
         let response = emptyResponse();
         if (!param.isDnsMsg) {
-            this.log.w(param.rxid, "not a dns-msg, nowt to resolve");
+            this.log.d(param.rxid, "not a dns-msg, nowt to resolve");
             return response;
         }
         try {
-            response.data = await this.resolveFromCache(param);
+            response.data = await this.resolveFromCache(param.rxid, param.requestDecodedDnsPacket, param.userBlocklistInfo);
         } catch (e) {
-            this.log.e(param.rxid, "main", e);
+            this.log.e(param.rxid, "main", e.stack);
             response = errResponse("DnsCacheHandler", e);
         }
         return response;
     }
-    async resolveFromCache(param) {
-        const key = cacheKey(param.requestDecodedDnsPacket);
-        if (!key) return false;
-        const cacheResponse = await param.dnsCache.get(key, param.request.url);
-        this.log.d(param.rxid, "resolveFromCache k/v", key, cacheResponse);
-        if (!cacheResponse) return false;
-        return await this.makeCacheResponse(param.rxid, cacheResponse, param.userBlocklistInfo, param.requestDecodedDnsPacket, param.dnsQuestionBlock, param.dnsResponseBlock);
+    async resolveFromCache(rxid, packet, blockInfo) {
+        const noAnswer = rdnsNoBlockResponse();
+        const blf = this.bw.getBlocklistFilter();
+        const onlyLocal = isBlocklistFilterSetup(blf);
+        const k = makeHttpCacheKey(packet);
+        if (!k) return noAnswer;
+        const cr = await this.cache.get(k, onlyLocal);
+        this.log.d(rxid, "local?", onlyLocal, "cached ans", k.href, cr);
+        if (emptyObj(cr)) return noAnswer;
+        const stamps = blockstampFromCache(cr);
+        const res = dnsResponse(cr.dnsPacket, cr.dnsBuffer, stamps);
+        this.makeCacheResponse(rxid, res, blockInfo);
+        if (res.isBlocked) return res;
+        if (!isAnswerFresh(cr.metadata)) {
+            this.log.d(rxid, "cache ans not fresh");
+            return noAnswer;
+        }
+        updatedAnswer(res.dnsPacket, packet.id, cr.metadata.expiry);
+        const reencoded = encode3(res.dnsPacket);
+        return dnsResponse(res.dnsPacket, reencoded, res.stamps);
     }
-    async makeCacheResponse(rxid, cr, blockInfo, reqDnsPacket, qb, rb) {
-        const qresponse = blockIfNeeded(rxid, qb, reqDnsPacket, cr.metaData.cacheFilter, blockInfo);
-        this.log.d(rxid, blockInfo, "question block?", qresponse);
-        if (qresponse && qresponse.isBlocked) {
-            return qresponse;
+    makeCacheResponse(rxid, r, blockInfo) {
+        this.blocker.blockQuestion(rxid, r, blockInfo);
+        this.log.d(rxid, blockInfo, "question blocked?", r.isBlocked);
+        if (r.isBlocked) {
+            return r;
         }
-        if (!hasAnswer(cr)) {
-            return false;
+        if (!hasAnswers(r.dnsPacket)) {
+            return r;
         }
-        const aresponse = blockIfNeeded(rxid, rb, cr.dnsPacket, cr.metaData.cacheFilter, blockInfo);
-        this.log.d(rxid, "answer block?", aresponse);
-        if (aresponse && aresponse.isBlocked) {
-            return aresponse;
-        }
-        return modifyCacheResponse(cr, reqDnsPacket.id);
+        this.blocker.blockAnswer(rxid, r, blockInfo);
+        this.log.d(rxid, "answer block?", r.isBlocked);
+        return r;
     }
 }
-function blockIfNeeded(rxid, blocker, dnsPacket, cf, blockInfo) {
-    return blocker.performBlocking(rxid, blockInfo, dnsPacket, false, cf);
+class CacheApi {
+    constructor(){
+        this.noop = !hasHttpCache();
+        if (this.noop) {
+            log.w("no-op http-cache-api");
+        }
+    }
+    async get(href) {
+        if (this.noop) return false;
+        if (!href) return false;
+        return await caches.default.match(href);
+    }
+    put(href, response) {
+        if (this.noop) return false;
+        if (!href || !response) return false;
+        return caches.default.put(href, response);
+    }
 }
-function modifyCacheResponse(cr, qid) {
-    if (!isAnswerFresh(cr.metaData)) return false;
-    updateQueryId(cr.dnsPacket, qid);
-    updateTtl(cr.dnsPacket, cr.metaData.ttlEndTime);
-    return {
-        dnsPacket: cr.dnsPacket,
-        dnsBuffer: encode3(cr.dnsPacket)
-    };
+class DnsCache {
+    constructor(size){
+        this.localcache = new LfuCache("DnsCache", size);
+        this.httpcache = new CacheApi();
+        this.log = log.withTags("DnsCache");
+    }
+    async get(url, localOnly = false) {
+        if (!url && emptyString(url.href)) {
+            this.log.d("get: empty url", url);
+            return null;
+        }
+        let entry = this.fromLocalCache(url.href);
+        if (entry) {
+            return entry;
+        }
+        if (localOnly) return null;
+        entry = await this.fromHttpCache(url);
+        if (entry) {
+            this.putLocalCache(url.href, entry);
+        }
+        return entry;
+    }
+    async put(url, data, dispatcher) {
+        if (!url || emptyString(url.href) || emptyObj(data) || emptyObj(data.metadata) || emptyObj(data.dnsPacket) || emptyBuf(data.dnsBuffer)) {
+            this.log.w("put: empty url/data", url, data);
+            return;
+        }
+        try {
+            this.log.d("put: data in cache", data);
+            const c = this.fromLocalCache(url.href);
+            const hasAns = !emptyObj(c) && isAnswer(c.dnsPacket);
+            const incomingHasAns = isAnswer(data.dnsPacket);
+            if (hasAns && !incomingHasAns) {
+                this.log.w("put ignored: cache has answer, incoming does not");
+                return;
+            }
+            this.putLocalCache(url, data);
+            dispatcher(this.putHttpCache(url, data));
+        } catch (e) {
+            this.log.e("put", url.href, data, e.stack);
+        }
+    }
+    putLocalCache(url, data) {
+        const k = url.href;
+        const v = makeLocalCacheValue(data.dnsBuffer, data.metadata);
+        if (!k || !v) return;
+        this.localcache.Put(k, v);
+    }
+    fromLocalCache(key) {
+        const res = this.localcache.Get(key);
+        if (emptyObj(res)) return false;
+        const b = res.dnsBuffer;
+        const p = decode3(b);
+        const m = res.metadata;
+        const cr = makeCacheValue(p, b, m);
+        return isValueValid(cr) ? cr : false;
+    }
+    async putHttpCache(url, data) {
+        const k = url.href;
+        const v = makeHttpCacheValue(data.dnsBuffer, data.metadata);
+        if (!k || !v) return;
+        return this.httpcache.put(k, v);
+    }
+    async fromHttpCache(url) {
+        const k = url.href;
+        const response = await this.httpcache.get(k);
+        if (!response || !response.ok) return false;
+        const metadata = extractMetadata(response);
+        this.log.d("http-cache response metadata", metadata);
+        const b = await response.arrayBuffer();
+        const p = decode3(b);
+        const m = metadata;
+        const cr = makeCacheValue(p, b, m);
+        return isValueValid(cr) ? cr : false;
+    }
 }
 const services = {
     ready: false
@@ -7398,19 +7660,24 @@ const services = {
 async function systemReady() {
     if (services.ready) return;
     log.i("svc: systemReady");
-    services.blocklistWrapper = new BlocklistWrapper();
-    services.commandControl = new CommandControl();
+    const bw = new BlocklistWrapper();
+    const cache = new DnsCache(cacheSize());
     services.userOperation = new UserOperation();
-    services.dnsQuestionBlock = new DNSQuestionBlock();
-    services.dnsResolver = new DNSResolver();
-    services.dnsResponseBlock = new DNSResponseBlock();
-    services.dnsCacheHandler = new DNSCacheResponse();
-    services.dnsCache = new DnsCache(cacheSize());
+    services.dnsCacheHandler = new DNSCacheResponder(bw, cache);
+    services.commandControl = new CommandControl(bw);
+    services.dnsResolver = new DNSResolver(bw, cache);
+    await maybeSetupBlocklists(bw);
+    done();
+}
+async function maybeSetupBlocklists(bw) {
+    if (!hasDynamicImports()) return;
     if (isNode()) {
         const b = await import("./node/blocklists.js");
-        await b.setup(services.blocklistWrapper);
+        await b.setup(bw);
+    } else if (isDeno()) {
+        const b = await import("./deno/blocklists.ts");
+        await b.setup(bw);
     }
-    done();
 }
 function done() {
     services.ready = true;
@@ -7419,77 +7686,39 @@ function done() {
 class RethinkPlugin {
     constructor(event){
         if (!services.ready) throw new Error("services not ready");
-        this.parameter = new Map(envManager.getMap());
+        this.parameter = new Map();
         const rxid = rxidFromHeader(event.request.headers) || xid();
         this.registerParameter("rxid", "[rx." + rxid + "]");
-        this.registerParameter("event", event);
         this.registerParameter("request", event.request);
-        this.registerParameter("dnsQuestionBlock", services.dnsQuestionBlock);
-        this.registerParameter("dnsResponseBlock", services.dnsResponseBlock);
-        this.registerParameter("dnsCache", services.dnsCache);
+        this.registerParameter("dispatcher", event.waitUntil.bind(event));
         this.log = log.withTags("RethinkPlugin");
         this.plugin = [];
         this.registerPlugin("userOperation", services.userOperation, [
             "rxid",
-            "dnsResolverUrl",
             "request",
             "isDnsMsg"
         ], this.userOperationCallBack, false);
-        this.registerPlugin("DnsCacheHandler", services.dnsCacheHandler, [
+        this.registerPlugin("cacheOnlyResolver", services.dnsCacheHandler, [
             "rxid",
             "userBlocklistInfo",
-            "request",
             "requestDecodedDnsPacket",
-            "isDnsMsg",
-            "dnsCache",
-            "dnsQuestionBlock",
-            "dnsResponseBlock", 
+            "isDnsMsg"
         ], this.dnsCacheCallBack, false);
-        this.registerPlugin("blocklistFilter", services.blocklistWrapper, [
-            "rxid",
-            "blocklistUrl",
-            "latestTimestamp",
-            "workerTimeout",
-            "tdParts",
-            "tdNodecount",
-            "fetchTimeout", 
-        ], this.blocklistFilterCallBack, false);
         this.registerPlugin("commandControl", services.commandControl, [
             "rxid",
             "request",
-            "blocklistFilter",
-            "latestTimestamp",
             "isDnsMsg"
         ], this.commandControlCallBack, false);
-        this.registerPlugin("dnsQuestionBlock", services.dnsQuestionBlock, [
-            "rxid",
-            "requestDecodedDnsPacket",
-            "blocklistFilter",
-            "userBlocklistInfo",
-            "event",
-            "request",
-            "dnsCache", 
-        ], this.dnsQuestionBlockCallBack, false);
         this.registerPlugin("dnsResolver", services.dnsResolver, [
             "rxid",
-            "requestBodyBuffer",
+            "dispatcher",
             "request",
-            "dnsResolverUrl",
-            "requestDecodedDnsPacket",
-            "event",
-            "blocklistFilter",
-            "dnsCache", 
-        ], this.dnsResolverCallBack, false);
-        this.registerPlugin("DNSResponseBlock", services.dnsResponseBlock, [
-            "rxid",
+            "userDnsResolverUrl",
             "userBlocklistInfo",
-            "blocklistFilter",
-            "responseDecodedDnsPacket",
-            "responseBodyBuffer",
-            "event",
-            "request",
-            "dnsCache", 
-        ], this.dnsResponseBlockCallBack, false);
+            "domainBlockstamp",
+            "requestDecodedDnsPacket",
+            "requestBodyBuffer", 
+        ], this.dnsResolverCallBack, false);
     }
     registerParameter(k, v) {
         this.parameter.set(k, v);
@@ -7521,22 +7750,12 @@ class RethinkPlugin {
         }
         this.log.endTime(t);
     }
-    blocklistFilterCallBack(response, currentRequest) {
-        const rxid = this.parameter.get("rxid");
-        const r = response.data;
-        this.log.d(rxid, "blocklist-filter response");
-        if (response.isException || emptyObj(r) || emptyObj(r.blocklistFilter)) {
-            this.log.e(rxid, "err building blocklist-filter", response);
-            this.loadException(rxid, response, currentRequest);
-            return;
-        }
-        this.registerParameter("blocklistFilter", r.blocklistFilter);
-    }
     async commandControlCallBack(response, currentRequest) {
         const rxid = this.parameter.get("rxid");
         const r = response.data;
         this.log.d(rxid, "command-control response");
         if (!emptyObj(r) && r.stopProcessing) {
+            this.log.d(rxid, "command-control reply", r);
             currentRequest.hResponse(r.httpResponse);
         }
     }
@@ -7549,7 +7768,7 @@ class RethinkPlugin {
             this.loadException(rxid, response, currentRequest);
         } else if (!emptyObj(r)) {
             this.registerParameter("userBlocklistInfo", r.userBlocklistInfo);
-            this.registerParameter("dnsResolverUrl", r.dnsResolverUrl);
+            this.registerParameter("userDnsResolverUrl", r.dnsResolverUrl);
         } else {
             this.log.i(rxid, "user-op is a no-op, possibly a command-control req");
         }
@@ -7557,57 +7776,38 @@ class RethinkPlugin {
     dnsCacheCallBack(response, currentRequest) {
         const rxid = this.parameter.get("rxid");
         const r = response.data;
-        const blocked = !emptyObj(r) && r.isBlocked;
-        const answered = !emptyObj(r) && !emptyBuf(r.dnsBuffer);
-        this.log.d(rxid, "cache-handler: block?", blocked, "ans?", answered);
+        const deny = r.isBlocked;
+        const isAns = isAnswer(r.dnsPacket);
+        const noErr = rcodeNoError(r.dnsPacket);
+        this.log.d(rxid, "crr: block?", deny, "ans?", isAns, "noerr", noErr);
         if (response.isException) {
             this.loadException(rxid, response, currentRequest);
-        } else if (blocked) {
-            currentRequest.dnsBlockResponse(r.blockedB64Flag);
-        } else if (answered) {
+        } else if (deny) {
+            currentRequest.dnsBlockResponse(r.flag);
+        } else if (isAns) {
+            this.registerParameter("responseBodyBuffer", r.dnsBuffer);
             this.registerParameter("responseDecodedDnsPacket", r.dnsPacket);
-            currentRequest.dnsResponse(r.dnsBuffer, r.dnsPacket);
+            currentRequest.dnsResponse(r.dnsBuffer, r.dnsPacket, r.flag);
         } else {
+            this.registerParameter("domainBlockstamp", r.stamps);
             this.log.d(rxid, "resolve query; no response from cache-handler");
-        }
-    }
-    dnsQuestionBlockCallBack(response, currentRequest) {
-        const rxid = this.parameter.get("rxid");
-        const r = response.data;
-        const blocked = !emptyObj(r) && r.isBlocked;
-        this.log.d(rxid, "question-block blocked?", blocked);
-        if (response.isException) {
-            this.loadException(rxid, response, currentRequest);
-        } else if (blocked) {
-            currentRequest.dnsBlockResponse(r.blockedB64Flag);
-        } else {
-            this.log.d(rxid, "all okay, no actionable res from question-block");
         }
     }
     dnsResolverCallBack(response, currentRequest) {
         const rxid = this.parameter.get("rxid");
         const r = response.data;
-        this.log.d(rxid, "dns-resolver packet");
-        if (response.isException || emptyObj(r) || emptyBuf(r.dnsBuffer)) {
-            this.log.w(rxid, "err dns-resolver", response);
+        const deny = r.isBlocked;
+        const isAns = isAnswer(r.dnsPacket);
+        const noErr = rcodeNoError(r.dnsPacket);
+        this.log.d(rxid, "rr: block?", deny, "ans?", isAns, "noerr?", noErr);
+        if (deny) {
+            currentRequest.dnsBlockResponse(r.flag);
+        } else if (response.isException || !isAns) {
             this.loadException(rxid, response, currentRequest);
-            return;
-        }
-        this.registerParameter("responseBodyBuffer", r.dnsBuffer);
-        this.registerParameter("responseDecodedDnsPacket", r.dnsPacket);
-    }
-    dnsResponseBlockCallBack(response, currentRequest) {
-        const rxid = this.parameter.get("rxid");
-        const r = response.data;
-        const blocked = !emptyObj(r) && r.isBlocked;
-        this.log.d(rxid, "ans-block blocked?", blocked);
-        currentRequest.stopProcessing = true;
-        if (response.isException) {
-            this.loadException(rxid, response, currentRequest);
-        } else if (blocked) {
-            currentRequest.dnsBlockResponse(r.blockedB64Flag);
         } else {
-            currentRequest.dnsResponse(this.parameter.get("responseBodyBuffer"), this.parameter.get("responseDecodedDnsPacket"));
+            this.registerParameter("responseBodyBuffer", r.dnsBuffer);
+            this.registerParameter("responseDecodedDnsPacket", r.dnsPacket);
+            currentRequest.dnsResponse(r.dnsBuffer, r.dnsPacket, r.flag);
         }
     }
     loadException(rxid, response, currentRequest) {
@@ -7621,7 +7821,10 @@ class RethinkPlugin {
         currentRequest.id(rxid);
         this.registerParameter("isDnsMsg", isDnsMsg2);
         if (!isDnsMsg2) {
-            if (!isGetRequest(request)) setInvalidResponse(currentRequest);
+            if (!isGetRequest(request)) {
+                this.log.i(rxid, "not a dns-msg, not a GET req either", request);
+                currentRequest.hResponse(respond405());
+            }
             return;
         }
         const question1 = await extractDnsQuestion(request);
@@ -7648,50 +7851,249 @@ async function extractDnsQuestion(request) {
         return base64ToBytes(dnsQuery);
     }
 }
-function setInvalidResponse(currentRequest) {
-    currentRequest.hResponse(respond405());
-}
 function handleRequest(event) {
-    return Promise.race([
-        new Promise((accept, _)=>{
-            accept(proxyRequest(event));
-        }),
-        new Promise((accept, _)=>{
-            timeout(requestTimeout(), ()=>{
-                log.e("doh", "handle-request timeout");
-                accept(servfail1());
-            });
-        }), 
-    ]);
+    return proxyRequest(event);
 }
 async function proxyRequest(event) {
+    if (optionsRequest(event.request)) return respond204();
+    const cr = new CurrentRequest();
     try {
-        if (optionsRequest(event.request)) return respond204();
-        const currentRequest = new CurrentRequest();
         const plugin = new RethinkPlugin(event);
-        await plugin.executePlugin(currentRequest);
-        const ua = event.request.headers.get("User-Agent");
-        if (fromBrowser(ua)) currentRequest.setCorsHeadersIfNeeded();
-        return currentRequest.httpResponse;
+        await timedSafeAsyncOp(async ()=>plugin.executePlugin(cr)
+        , requestTimeout(), async ()=>errorResponse(cr)
+        );
     } catch (err) {
-        log.e("doh", "proxy-request error", err);
-        return errorOrServfail(event.request, err);
+        log.e("doh", "proxy-request error", err.stack);
+        errorResponse(cr, err);
     }
+    const ua = event.request.headers.get("User-Agent");
+    if (fromBrowser(ua)) cr.setCorsHeadersIfNeeded();
+    return cr.httpResponse;
 }
 function optionsRequest(request) {
     return request.method === "OPTIONS";
 }
-function errorOrServfail(request, err) {
-    const ua = request.headers.get("User-Agent");
-    if (!fromBrowser(ua)) return servfail1();
-    const res = new Response(JSON.stringify(err.stack), {
-        status: 503,
-        headers: browserHeaders()
-    });
-    return res;
+function errorResponse(currentRequest, err = null) {
+    const eres = errResponse("doh.js", err);
+    currentRequest.dnsExceptionResponse(eres);
 }
-function servfail1() {
-    return respond503();
+function delay(ms, options = {}) {
+    const { signal  } = options;
+    if (signal?.aborted) {
+        return Promise.reject(new DOMException("Delay was aborted.", "AbortError"));
+    }
+    return new Promise((resolve, reject)=>{
+        const abort = ()=>{
+            clearTimeout(i34);
+            reject(new DOMException("Delay was aborted.", "AbortError"));
+        };
+        const done1 = ()=>{
+            signal?.removeEventListener("abort", abort);
+            resolve();
+        };
+        const i34 = setTimeout(done1, ms);
+        signal?.addEventListener("abort", abort, {
+            once: true
+        });
+    });
+}
+const ERROR_SERVER_CLOSED = "Server closed";
+const INITIAL_ACCEPT_BACKOFF_DELAY = 5;
+const MAX_ACCEPT_BACKOFF_DELAY = 1000;
+class Server {
+    #port;
+    #host;
+    #handler;
+    #closed = false;
+    #listeners = new Set();
+    #httpConnections = new Set();
+    #onError;
+    constructor(serverInit){
+        this.#port = serverInit.port;
+        this.#host = serverInit.hostname;
+        this.#handler = serverInit.handler;
+        this.#onError = serverInit.onError ?? function(error) {
+            console.error(error);
+            return new Response("Internal Server Error", {
+                status: 500
+            });
+        };
+    }
+    async serve(listener) {
+        if (this.#closed) {
+            throw new Deno.errors.Http(ERROR_SERVER_CLOSED);
+        }
+        this.#trackListener(listener);
+        try {
+            return await this.#accept(listener);
+        } finally{
+            this.#untrackListener(listener);
+            try {
+                listener.close();
+            } catch  {}
+        }
+    }
+    async listenAndServe() {
+        if (this.#closed) {
+            throw new Deno.errors.Http(ERROR_SERVER_CLOSED);
+        }
+        const listener = Deno.listen({
+            port: this.#port ?? 80,
+            hostname: this.#host ?? "0.0.0.0",
+            transport: "tcp"
+        });
+        return await this.serve(listener);
+    }
+    async listenAndServeTls(certFile, keyFile) {
+        if (this.#closed) {
+            throw new Deno.errors.Http(ERROR_SERVER_CLOSED);
+        }
+        const listener = Deno.listenTls({
+            port: this.#port ?? 443,
+            hostname: this.#host ?? "0.0.0.0",
+            certFile,
+            keyFile,
+            transport: "tcp"
+        });
+        return await this.serve(listener);
+    }
+    close() {
+        if (this.#closed) {
+            throw new Deno.errors.Http(ERROR_SERVER_CLOSED);
+        }
+        this.#closed = true;
+        for (const listener of this.#listeners){
+            try {
+                listener.close();
+            } catch  {}
+        }
+        this.#listeners.clear();
+        for (const httpConn of this.#httpConnections){
+            this.#closeHttpConn(httpConn);
+        }
+        this.#httpConnections.clear();
+    }
+    get closed() {
+        return this.#closed;
+    }
+    get addrs() {
+        return Array.from(this.#listeners).map((listener)=>listener.addr
+        );
+    }
+    async #respond(requestEvent, httpConn, connInfo) {
+        let response;
+        try {
+            response = await this.#handler(requestEvent.request, connInfo);
+        } catch (error) {
+            response = await this.#onError(error);
+        }
+        try {
+            await requestEvent.respondWith(response);
+        } catch  {
+            return this.#closeHttpConn(httpConn);
+        }
+    }
+    async #serveHttp(httpConn1, connInfo1) {
+        while(!this.#closed){
+            let requestEvent;
+            try {
+                requestEvent = await httpConn1.nextRequest();
+            } catch  {
+                break;
+            }
+            if (requestEvent === null) {
+                break;
+            }
+            this.#respond(requestEvent, httpConn1, connInfo1);
+        }
+        this.#closeHttpConn(httpConn1);
+    }
+    async #accept(listener) {
+        let acceptBackoffDelay;
+        while(!this.#closed){
+            let conn;
+            try {
+                conn = await listener.accept();
+            } catch (error) {
+                if (error instanceof Deno.errors.BadResource || error instanceof Deno.errors.InvalidData || error instanceof Deno.errors.UnexpectedEof || error instanceof Deno.errors.ConnectionReset || error instanceof Deno.errors.NotConnected) {
+                    if (!acceptBackoffDelay) {
+                        acceptBackoffDelay = INITIAL_ACCEPT_BACKOFF_DELAY;
+                    } else {
+                        acceptBackoffDelay *= 2;
+                    }
+                    if (acceptBackoffDelay >= 1000) {
+                        acceptBackoffDelay = MAX_ACCEPT_BACKOFF_DELAY;
+                    }
+                    await delay(acceptBackoffDelay);
+                    continue;
+                }
+                throw error;
+            }
+            acceptBackoffDelay = undefined;
+            let httpConn;
+            try {
+                httpConn = Deno.serveHttp(conn);
+            } catch  {
+                continue;
+            }
+            this.#trackHttpConnection(httpConn);
+            const connInfo = {
+                localAddr: conn.localAddr,
+                remoteAddr: conn.remoteAddr
+            };
+            this.#serveHttp(httpConn, connInfo);
+        }
+    }
+     #closeHttpConn(httpConn2) {
+        this.#untrackHttpConnection(httpConn2);
+        try {
+            httpConn2.close();
+        } catch  {}
+    }
+     #trackListener(listener1) {
+        this.#listeners.add(listener1);
+    }
+     #untrackListener(listener2) {
+        this.#listeners.delete(listener2);
+    }
+     #trackHttpConnection(httpConn3) {
+        this.#httpConnections.add(httpConn3);
+    }
+     #untrackHttpConnection(httpConn4) {
+        this.#httpConnections.delete(httpConn4);
+    }
+}
+async function serve(handler, options = {}) {
+    const server = new Server({
+        port: options.port ?? 8000,
+        hostname: options.hostname ?? "0.0.0.0",
+        handler,
+        onError: options.onError
+    });
+    if (options?.signal) {
+        options.signal.onabort = ()=>server.close()
+        ;
+    }
+    return await server.listenAndServe();
+}
+async function serveTls(handler, options) {
+    if (!options.keyFile) {
+        throw new Error("TLS config is given, but 'keyFile' is missing.");
+    }
+    if (!options.certFile) {
+        throw new Error("TLS config is given, but 'certFile' is missing.");
+    }
+    const server = new Server({
+        port: options.port ?? 8443,
+        hostname: options.hostname ?? "0.0.0.0",
+        handler,
+        onError: options.onError
+    });
+    if (options?.signal) {
+        options.signal.onabort = ()=>server.close()
+        ;
+    }
+    return await server.listenAndServeTls(options.certFile, options.keyFile);
 }
 let log1 = null;
 ((main)=>{
@@ -7699,70 +8101,70 @@ let log1 = null;
     pub("prepare");
 })();
 function systemUp() {
-    const { TERMINATE_TLS , TLS_CRT_PATH , TLS_KEY_PATH  } = Deno.env.toObject();
-    const tlsOptions = {
-        certFile: TLS_CRT_PATH,
-        keyFile: TLS_KEY_PATH
+    const onDenoDeploy1 = onDenoDeploy();
+    const dohConnOpts = {
+        port: dohBackendPort()
     };
-    const onDenoDeploy = Deno.env.get("CLOUD_PLATFORM") === "deno-deploy";
+    const dotConnOpts = {
+        port: dotBackendPort()
+    };
+    const tlsOpts = {
+        certFile: tlsCrtPath(),
+        keyFile: tlsKeyPath()
+    };
+    const httpOpts = {
+        alpnProtocols: [
+            "h2",
+            "http/1.1"
+        ]
+    };
     log1 = logger("Deno");
     if (!log1) throw new Error("logger unavailable on system up");
     startDoh();
-    !onDenoDeploy && startDot();
+    startDotIfPossible();
     async function startDoh() {
-        const doh = TERMINATE_TLS === "true" ? Deno.listenTls({
-            port: 8080,
-            ...tlsOptions
-        }) : Deno.listen({
-            port: 8080
-        });
-        up("DoH", doh.addr);
-        for await (const conn of doh){
-            log1.d("DoH conn:", conn.remoteAddr);
-            serveHttp(conn);
+        if (terminateTls()) {
+            serveTls(serveDoh, {
+                ...dohConnOpts,
+                ...tlsOpts,
+                ...httpOpts
+            });
+        } else {
+            serve(serveDoh, {
+                ...dohConnOpts
+            });
         }
+        up("DoH", dohConnOpts);
     }
-    async function startDot() {
-        const dot = TERMINATE_TLS === "true" ? Deno.listenTls({
-            port: 10000,
-            ...tlsOptions
+    async function startDotIfPossible() {
+        if (onDenoDeploy1) return;
+        const dot = terminateTls() ? Deno.listenTls({
+            ...dotConnOpts,
+            ...tlsOpts
         }) : Deno.listen({
-            port: 10000
+            ...dotConnOpts
         });
-        up("DoT (no blocking)", dot.addr);
+        up("DoT (no blocklists)", dotConnOpts);
         for await (const conn of dot){
             log1.d("DoT conn:", conn.remoteAddr);
             serveTcp(conn);
         }
     }
-    function up(server, addr) {
-        log1.i(server, `listening on: [${addr.hostname}]:${addr.port}`);
+    function up(p, opts) {
+        log1.i("up", p, opts, "tls?", terminateTls());
+    }
+    function terminateTls() {
+        if (onDenoDeploy1) return false;
+        if (emptyString(tlsOpts.keyFile)) return false;
+        if (emptyString(tlsOpts.certFile)) return false;
+        return true;
     }
 }
-async function serveHttp(conn) {
-    const httpConn = Deno.serveHttp(conn);
-    let requestEvent = null;
-    while(true){
-        try {
-            requestEvent = await httpConn.nextRequest();
-        } catch (e) {
-            log1.w("error reading http request", e);
-        }
-        if (requestEvent) {
-            let res = null;
-            try {
-                res = handleRequest(requestEvent);
-            } catch (e) {
-                res = respond503();
-                log1.w("error handling http request", e);
-            } finally{
-                try {
-                    await requestEvent.respondWith(res);
-                } catch (e) {
-                    log1.w("error responding to http request", e);
-                }
-            }
-        }
+async function serveDoh(req) {
+    try {
+        return handleRequest(mkFetchEvent(req));
+    } catch (e) {
+        log1.w("doh fail", e);
     }
 }
 async function serveTcp(conn) {
@@ -7772,15 +8174,15 @@ async function serveTcp(conn) {
         try {
             n = await conn.read(qlBuf);
         } catch (e) {
-            log1.w("error reading from tcp query socket", e);
+            log1.w("err tcp query read", e);
             break;
         }
         if (n == 0 || n == null) {
-            log1.d("TCP socket clean shutdown");
+            log1.d("tcp socket clean shutdown");
             break;
         }
         if (n < 2) {
-            log1.w("incomplete query length");
+            log1.w("query too small");
             break;
         }
         const ql = new DataView(qlBuf.buffer).getUint16(0);
@@ -7789,7 +8191,7 @@ async function serveTcp(conn) {
         n = await conn.read(q);
         log1.d(`Read ${n} length q`);
         if (n != ql) {
-            log1.w(`incomplete query: ${n} < ${ql}`);
+            log1.w(`query len mismatch: ${n} < ${ql}`);
             break;
         }
         await handleTCPQuery(q, conn);
@@ -7808,16 +8210,34 @@ async function handleTCPQuery(q, conn) {
             log1.e(`res write incomplete: ${n} < ${r.byteLength + 2}`);
         }
     } catch (e) {
-        log1.w("error handling tcp query", e);
+        log1.w("err tcp query resolve", e);
     }
 }
 async function resolveQuery(q) {
-    const r = await handleRequest({
-        request: new Request("https://example.com", {
-            method: "POST",
-            headers: concatHeaders(dnsHeaders(), contentLengthHeader(q)),
-            body: q
-        })
+    const freq = new Request("https://ignored.example.com", {
+        method: "POST",
+        headers: concatHeaders(dnsHeaders(), contentLengthHeader(q)),
+        body: q
     });
-    return new Uint8Array(await r.arrayBuffer());
+    const r = await handleRequest(mkFetchEvent(freq));
+    const ans = await r.arrayBuffer();
+    if (!emptyBuf(ans)) {
+        return new Uint8Array(ans);
+    } else {
+        return new Uint8Array(servfailQ(q));
+    }
+}
+function mkFetchEvent(r, ...fns) {
+    if (!r) throw new Error("missing request");
+    return {
+        type: "fetch",
+        request: r,
+        respondWith: fns[0] || stub("event.respondWith"),
+        waitUntil: fns[1] || stub("event.waitUntil"),
+        passThroughOnException: fns[2] || stub("event.passThroughOnException")
+    };
+}
+function stub(fid) {
+    return (...rest)=>log1.d(fid, "stub fn, args:", ...rest)
+    ;
 }
