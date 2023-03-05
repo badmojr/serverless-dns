@@ -135,6 +135,7 @@ export function timedOp(op, ms, cleanup = () => {}) {
         clearTimeout(tid);
 
         if (ex) {
+          cleanup(out);
           reject(ex);
         } else {
           resolve(out);
@@ -200,15 +201,29 @@ export function rolldice(sides = 6) {
 }
 
 // stackoverflow.com/a/8084248
-export function uid() {
+export function uid(prefix = "") {
   // ex: ".ww8ja208it"
-  return (Math.random() + 1).toString(36).slice(1);
+  return prefix + (Math.random() + 1).toString(36).slice(1);
 }
 
 export function xid() {
   const hi = vmid();
   const lo = uid();
+  // ex: "m3c52dyhqz.ww8ja208it"
   return hi + lo;
+}
+
+export function uidFromXidOrRxid(id) {
+  if (emptyString(id)) return "";
+
+  const uidStartChar = id.lastIndexOf(".");
+  const rxidEndChar = id.lastIndexOf("]");
+  const p = uidStartChar;
+  const q = rxidEndChar < 0 ? id.length : rxidEndChar;
+
+  if (p < 0 || p >= id.length - 1 || q <= p) return "";
+
+  return id.slice(p + 1, q);
 }
 
 // on Workers, random number can only be generated in a "network-context"
@@ -243,6 +258,7 @@ export function microtaskBox(fns, arg) {
 }
 
 // TODO: safeBox for async fns with r.push(await f())?
+// stackoverflow.com/questions/38508420
 export function safeBox(fns, arg) {
   if (typeof fns === "function") {
     fns = [fns];
@@ -283,27 +299,33 @@ export function isDnsMsg(req) {
   );
 }
 
-export function emptyResponse() {
-  return {
-    isException: false,
-    exceptionStack: "",
-    exceptionFrom: "",
-    data: {},
-  };
-}
-
-export function errResponse(id, err) {
-  const st = emptyObj(err) || !err.stack ? "no-stacktrace" : err.stack;
-  return {
-    isException: true,
-    exceptionStack: st,
-    exceptionFrom: id,
-    data: {},
-  };
-}
-
 export function mapOf(obj) {
   return new Map(Object.entries(obj));
+}
+
+export function isAlphaNumeric(str) {
+  return /^[a-z0-9]+$/i.test(str);
+}
+
+export function isDNSName(str) {
+  return /^[a-z0-9\.-]+$/i.test(str);
+}
+
+export function strstr(str, start = 0, end = str.length) {
+  if (emptyString(str)) return str;
+  if (start >= str.length) return "";
+  if (end <= start) return "";
+
+  start = start < 0 ? 0 : start;
+  end = end > str.length ? str.length : end;
+
+  return str.slice(start, end);
+}
+
+export function emptySet(s) {
+  if (!s) return true;
+  if (s instanceof Set) return s.size <= 0;
+  return true;
 }
 
 export function emptyString(str) {
@@ -320,6 +342,7 @@ export function emptyArray(a) {
   if (!a) return true;
   // obj v arr: stackoverflow.com/a/2462810
   if (typeof a !== "object") return false;
+  if (!a.hasOwnProperty("length")) return false;
   // len(a) === 0 is empty
   return a.length <= 0;
 }
@@ -366,6 +389,14 @@ export function respond400() {
   });
 }
 
+export function respond401() {
+  return new Response(null, {
+    status: 401,
+    statusText: "Authorization Required",
+    headers: dohHeaders(),
+  });
+}
+
 export function respond405() {
   return new Response(null, {
     status: 405,
@@ -388,6 +419,12 @@ export function respond503() {
   });
 }
 
+export function tkt48() {
+  const t = new Uint8Array(48);
+  crypto.getRandomValues(t);
+  return t;
+}
+
 export function logger(...tags) {
   if (!log) return null;
 
@@ -400,6 +437,27 @@ export function isPostRequest(req) {
 
 export function isGetRequest(req) {
   return req && !emptyString(req.method) && req.method.toUpperCase() === "GET";
+}
+
+export function fromPath(strurl, re) {
+  const empty = "";
+  if (emptyString(strurl)) return empty;
+  if (!(re instanceof RegExp)) {
+    throw new Error(`invalid arg: ${re} must be RegExp`);
+  }
+
+  const u = new URL(strurl);
+  // ex: x.tld/1:a/b/l:c/ => ["", "1:a", "b", "l:c", ""]
+  const p = u.pathname.split("/");
+  for (const x of p) {
+    // returns ["1:"] if the x matches the regex
+    const m = x.match(re);
+    if (m != null && m.length > 0) {
+      // return the string after the prefix
+      return strstr(x, m[0].length);
+    }
+  }
+  return empty;
 }
 
 export function isGatewayRequest(req) {
@@ -421,6 +479,65 @@ export function isGatewayQuery(p) {
   return p === "gateway";
 }
 
+function isNumeric4(str) {
+  return /^[0-9.]+$/.test(str);
+}
+
+function isHex6(str) {
+  // ipv4-in-ipv6 addrs may have . in them
+  return /^[a-f0-9:.]+$/i.test(str);
+}
+
+function maybeIP6(str) {
+  return !emptyString(str) && str.split(":").length > 3 && isHex6(str);
+}
+
+function maybeIP4(str) {
+  return !emptyString(str) && str.split(".").length === 4 && isNumeric4(str);
+}
+
+// poorman's ip validation, don't rely for serious stuff
+export function maybeIP(str) {
+  return maybeIP4(str) || maybeIP6(str);
+}
+
+export function* domains(urlOrHost) {
+  if (emptyString(urlOrHost)) return "";
+
+  let hostname = urlOrHost;
+  if (urlOrHost.indexOf(":") > -1 || urlOrHost.indexOf("/") > -1) {
+    const u = new URL(urlOrHost);
+    hostname = u.hostname;
+  }
+
+  const d = hostname.split(".");
+  for (let i = 0; i < d.length; i++) {
+    yield d.slice(i).join(".");
+  }
+}
+
+export function tld(urlstr, upto = 2, d = ".") {
+  if (emptyString(urlstr)) return "";
+  // convert a domain-name of form x.y.tld to url http://x.y.tld
+  if (!urlstr.includes("://")) urlstr = "http://" + urlstr;
+
+  const u = new URL(urlstr);
+  // todo: fails for domains like "gov.uk", "co.in" etc
+  // see: publicsuffix.org/list/public_suffix_list.dat
+  return u.hostname.split(".").slice(-upto).join(d);
+}
+
+export function bounds(n, min, max) {
+  if (min > max) {
+    const t = max;
+    max = min;
+    min = t;
+  }
+  if (n < min) return min;
+  if (n > max) return max;
+  return n;
+}
+
 export function mkFetchEvent(r, ...fns) {
   if (emptyObj(r)) throw new Error("missing request");
   for (const f of fns) {
@@ -428,6 +545,7 @@ export function mkFetchEvent(r, ...fns) {
   }
   // developer.mozilla.org/en-US/docs/Web/API/FetchEvent
   // developers.cloudflare.com/workers/runtime-apis/fetch-event
+  // deno.land/manual/runtime/http_server_apis#http-requests-and-responses
   // a service-worker event, with properties: type and request; and methods:
   // respondWith(Response), waitUntil(Promise), passThroughOnException(void)
   return {
@@ -441,6 +559,12 @@ export function mkFetchEvent(r, ...fns) {
 
 export function stub(...args) {
   return (...args) => {
+    /* no-op */
+  };
+}
+
+export function stubAsync(...args) {
+  return async (...args) => {
     /* no-op */
   };
 }

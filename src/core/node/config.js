@@ -13,9 +13,9 @@
  */
 import { atob, btoa } from "buffer";
 import process from "node:process";
-import { fetch, Headers, Request, Response } from "undici";
 import * as util from "./util.js";
 import * as blocklists from "./blocklists.js";
+import * as dbip from "./dbip.js";
 import Log from "../log.js";
 import * as system from "../../system.js";
 import { services, stopAfter } from "../svc.js";
@@ -27,40 +27,27 @@ import * as swap from "../linux/swap.js";
   system.when("steady").then(up);
 })();
 
-process.on("SIGINT", (sig) => stopAfter());
-
 async function prep() {
   // if this file execs... assume we're on nodejs.
   const isProd = process.env.NODE_ENV === "production";
   const onFly = process.env.CLOUD_PLATFORM === "fly";
   const profiling = process.env.PROFILE_DNS_RESOLVES === "true";
-
-  let devutils = null;
-  let dotenv = null;
-
-  // dev utilities
-  if (!isProd) {
-    devutils = await import("./util-dev.js");
-    // TODO: remove .env
-    dotenv = await import("dotenv");
-  }
-
-  /** Environment Variables */
-  // Load env variables from .env file to process.env (if file exists)
-  // NOTE: this won't overwrite existing
-  if (dotenv) {
-    dotenv.config();
-    console.log("loading local .env");
-  }
+  const debugFly = onFly && process.env.FLY_APP_NAME.includes("-dev");
 
   globalThis.envManager = new EnvManager();
 
   /** Logger */
-  globalThis.log = new Log({
-    level: envManager.get("LOG_LEVEL"),
-    levelize: isProd || profiling, // levelize if prod or profiling
-    withTimestamps: true, // always log timestamps on node
-  });
+  globalThis.log = debugFly
+    ? new Log({
+        level: "debug",
+        levelize: profiling, // levelize only if profiling
+        withTimestamps: true, // always log timestamps on node
+      })
+    : new Log({
+        level: envManager.get("LOG_LEVEL"),
+        levelize: isProd || profiling, // levelize if prod or profiling
+        withTimestamps: true, // always log timestamps on node
+      });
 
   // ---- log and envManager available only after this line ---- \\
 
@@ -95,6 +82,7 @@ async function prep() {
     }
   } else {
     try {
+      const devutils = await import("./util-dev.js");
       const [tlsKey, tlsCrt] = devutils.getTLSfromFile(
         envManager.get("TLS_KEY_PATH"),
         envManager.get("TLS_CRT_PATH")
@@ -110,17 +98,6 @@ async function prep() {
   }
 
   envManager.set("TLS_OFFLOAD", tlsoffload);
-
-  /** Polyfills */
-  if (!globalThis.fetch) {
-    globalThis.fetch = isProd ? fetch : devutils.fetchPlus;
-    globalThis.Headers = Headers;
-    globalThis.Request = Request;
-    globalThis.Response = Response;
-    log.i("polyfill fetch web api");
-  } else {
-    log.i("no fetch polyfill required");
-  }
 
   if (!globalThis.atob || !globalThis.btoa) {
     globalThis.atob = atob;
@@ -154,6 +131,18 @@ async function up() {
   } else {
     log.w("Config", "blocklists unavailable / disabled");
   }
+  const lp = services.logPusher;
+  if (lp != null) {
+    try {
+      await dbip.setup(lp);
+    } catch (ex) {
+      log.e("Config", "dbip setup failed", ex);
+    }
+  } else {
+    log.w("Config", "logpusher unavailable");
+  }
+
+  process.on("SIGINT", (sig) => stopAfter());
 
   // signal all system are-a go
   system.pub("go");

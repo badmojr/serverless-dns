@@ -6,25 +6,18 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-import { customTagToFlag } from "./trie.js";
 import * as dnsutil from "../../commons/dnsutil.js";
-import * as rdnsutil from "../rdns-util.js";
 
 export class BlocklistFilter {
   constructor() {
     // see: src/helpers/node/blocklists.js:hasBlocklistFiles
-    this.t = null;
-    this.ft = null;
-    this.blocklistBasicConfig = null;
-    this.blocklistFileTag = null;
-    this.enc = new TextEncoder();
+    this.ftrie = null;
+    this.filetag = null;
   }
 
-  load(t, ft, blocklistBasicConfig, blocklistFileTag) {
-    this.t = t;
-    this.ft = ft;
-    this.blocklistBasicConfig = blocklistBasicConfig;
-    this.blocklistFileTag = blocklistFileTag;
+  load(frozentrie, filetag) {
+    this.ftrie = frozentrie;
+    this.filetag = filetag;
   }
 
   blockstamp(domainName) {
@@ -34,19 +27,35 @@ export class BlocklistFilter {
   }
 
   lookup(n) {
-    return this.ft.lookup(this.reverseUtf8(n));
+    const t = this.ftrie;
+    try {
+      n = t.transform(n);
+      return t.lookup(n);
+    } catch (ignored) {
+      // usually u8 / u6 uencode error
+      /*
+       * E DnsResolver [rx.0n550a6jz.dcgr3go4md] main Error:
+       * encode: undef num: undefined, for: :,
+       * in: https://app-measurement.com/sdk-exp, res: 22,34,34,
+       * 30,33,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+       * at Codec.encodeinner (file:///app/fly.mjs:9362:15)
+       * at Codec.encode (file:///app/fly.mjs:9325:24)
+       * at FrozenTrie.transform (file:///app/fly.mjs:10443:23)
+       * at BlocklistFilter.lookup (file:///app/fly.mjs:10633:23)
+       * at BlocklistFilter.blockstamp (file:///app/fly.mjs:10628:17)
+       * at Object.blockstampFromBlocklistFilter (file:///app/fly.mjs:14692:35)
+       * at DNSResolver.makeRdnsResponse (file:///app/fly.mjs:11737:54)
+       * at DNSResolver.resolveDns (file:///app/fly.mjs:11618:26)
+       * at DNSResolver.exec (file:///app/fly.mjs:11536:34)
+       */
+      log.d("blf lookup err:", ignored.message);
+    }
+    return null;
   }
 
-  reverseUtf8(s) {
-    return this.enc.encode(s).reverse();
-  }
-
-  getTag(uintFlag) {
-    return this.t.flagsToTag(uintFlag);
-  }
-
-  getB64FlagFromTag(tagList, flagVersion) {
-    const uintFlag = customTagToFlag(tagList, this.blocklistFileTag);
-    return rdnsutil.getB64Flag(uintFlag, flagVersion);
+  extract(ids) {
+    const r = {};
+    for (const id of ids) r[id] = this.filetag[id];
+    return r;
   }
 }

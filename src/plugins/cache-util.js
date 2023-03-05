@@ -5,6 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
+import * as cfg from "../core/cfg.js";
 import * as util from "../commons/util.js";
 import * as dnsutil from "../commons/dnsutil.js";
 import * as envutil from "../commons/envutil.js";
@@ -29,7 +30,7 @@ function determineCacheExpiry(packet) {
   let ttl = someVeryHighTtl;
 
   // TODO: nxdomain ttls are in the authority section
-  // FIXME: OPT answers do not have a ttl field
+  // TODO: OPT answers need not set a ttl field
   // set min(ttl) among all answers, but at least minTtlSec
   for (const a of packet.answers) ttl = Math.min(a.ttl || minTtlSec, ttl);
 
@@ -90,10 +91,9 @@ function makeId(packet) {
   // multiple questions are kind of an undefined behaviour
   // stackoverflow.com/a/55093896
   if (!dnsutil.hasSingleQuestion(packet)) return null;
-
-  const name = dnsutil.normalizeName(packet.questions[0].name);
-  const type = packet.questions[0].type;
-  return name + ":" + type;
+  const q = packet.questions[0];
+  const addn = dnsutil.hasDnssecOk(packet) ? ":dnssec" : "";
+  return dnsutil.normalizeName(q.name) + ":" + q.type + addn;
 }
 
 export function makeLocalCacheValue(b, metadata) {
@@ -125,7 +125,7 @@ export function makeHttpCacheKey(packet) {
   const id = makeId(packet);
   if (util.emptyString(id)) return null;
 
-  return new URL(_cacheurl + envutil.timestamp() + "/" + id);
+  return new URL(_cacheurl + cfg.timestamp() + "/" + id);
 }
 
 export function extractMetadata(cres) {

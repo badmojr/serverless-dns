@@ -28,7 +28,7 @@ const _maxRequestTimeout = 30000; // 30s
 
 export function dnsaddr() {
   // flydns is always ipv6 (fdaa::53)
-  if (envutil.onFly()) return _dnsFly6;
+  if (envutil.recursive()) return _dnsFly6;
   return _dnsCloudflareSec4;
 }
 
@@ -40,6 +40,16 @@ export function isAnswer(packet) {
   if (util.emptyObj(packet)) return false;
 
   return packet.type === "response";
+}
+
+export function mkQ(qid, qs) {
+  if (util.emptyArray(qs)) return null;
+
+  return dnslib.encode({
+    id: qid || 0,
+    type: "query",
+    questions: qs,
+  });
 }
 
 export function servfail(qid, qs) {
@@ -108,6 +118,68 @@ export function rcodeNoError(packet) {
   return packet.rcode === "NOERROR";
 }
 
+export function hasDnssecOk(packet) {
+  if (util.emptyObj(packet)) return false;
+  if (util.emptyArray(packet.additionals)) return false;
+  // github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L1440
+  // github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L1523
+  // github.com/mafintosh/dns-packet/blob/31d3caf3/test.js#L407
+  for (const a of packet.additionals) {
+    if (a.flag_do || ((a.flags >> 15) & 0x1) === 1) return true;
+  }
+  return false;
+}
+
+export function dropECS(packet) {
+  let rmv = false;
+  if (util.emptyObj(packet)) return [packet, rmv];
+  if (util.emptyArray(packet.additionals)) return [packet, rmv];
+  /*
+    additionals: [{
+      name: '.', // same question as root
+      type: 'OPT',
+      udpPayloadSize: 4096,
+      extendedRcode: 0,
+      ednsVersion: 0,
+      flags: 32768,
+      flag_do: true, // dnssec ok
+      options: [
+        {
+          code: 8,
+          type: 'CLIENT_SUBNET',
+          data: <bytes>,
+          family: 1, // 2 for ipv6
+          sourcePrefixLength: 32,
+          scopePrefixLength: 0,
+          ip: '100.64.0.0'
+        },
+        {
+          code: 12,
+          type: 'PADDING',
+          data: <bytes>
+        }
+      ]
+    },
+    ...]
+  */
+  for (const a of packet.additionals) {
+    if (!optAnswer(a)) continue;
+
+    const filtered = [];
+    for (const opt of a.options) {
+      // github.com/mafintosh/dns-packet/blob/31d3caf3/test.js#L409-L412
+      if (opt.code === 8 || opt.type === "CLIENT_SUBNET") {
+        rmv = true;
+        continue;
+      }
+      filtered.push(opt);
+    }
+    a.options = filtered;
+  }
+  return [packet, rmv];
+}
+
+// dup: isAnswerOPT
 export function optAnswer(a) {
   if (util.emptyObj(a) || util.emptyString(a.type)) return false;
   // github.com/serverless-dns/dns-parser/blob/7de73303/index.js#L1770
@@ -132,34 +204,116 @@ export function encode(obj) {
   return bufutil.arrayBufferOf(b);
 }
 
+export function isQtypeA(qt) {
+  return qt === "A";
+}
+
+export function isQtypeAAAA(qt) {
+  return qt === "AAAA";
+}
+
+export function isQtypeCname(qt) {
+  return qt === "CNAME";
+}
+
+export function isQtypeHttps(qt) {
+  return qt === "HTTPS" || qt === "SVCB";
+}
+
+export function queryTypeMayResultInIP(t) {
+  return isQtypeA(t) || isQtypeAAAA(t) || isQtypeCname(t) || isQtypeHttps(t);
+}
+
+export function queryMayResultInIP(q) {
+  if (util.emptyObj(q)) return false;
+  if (util.emptyString(q.type)) return false;
+
+  return queryTypeMayResultInIP(q.type.toUpperCase());
+}
+
 // TODO: All DNS Qs are blockable but only these may eventually
 // result in a IP address answer, so we only block these. For now.
 // FIXME: Missing ALT-SVC checks
 export function isQueryBlockable(packet) {
-  return (
-    hasSingleQuestion(packet) &&
-    (packet.questions[0].type === "A" ||
-      packet.questions[0].type === "AAAA" ||
-      packet.questions[0].type === "CNAME" ||
-      packet.questions[0].type === "HTTPS" ||
-      packet.questions[0].type === "SVCB")
-  );
+  if (!hasSingleQuestion(packet)) return false;
+  const q = packet.questions[0];
+  return queryMayResultInIP(q);
 }
 
 export function isAnswerBlockable(packet) {
   return isCname(packet) || isHttps(packet);
 }
 
-export function isCname(packet) {
-  return hasAnswers(packet) && isAnswerCname(packet.answers[0]);
+export function isAnswerDS(ans) {
+  return !util.emptyObj(ans) && ans.type === "DS";
+}
+
+export function isAnswerRRSIG(ans) {
+  return !util.emptyObj(ans) && ans.type === "RRSIG";
+}
+
+export function isAnswerDNSKEY(ans) {
+  return !util.emptyObj(ans) && ans.type === "DNSKEY";
+}
+
+export function isAnswerRP(ans) {
+  return !util.emptyObj(ans) && ans.type === "RP";
+}
+
+export function isAnswerTXT(ans) {
+  return !util.emptyObj(ans) && ans.type === "TXT";
+}
+
+export function isAnswerNS(ans) {
+  return !util.emptyObj(ans) && ans.type === "NS";
+}
+
+export function isAnswerOPT(ans) {
+  return !util.emptyObj(ans) && ans.type === "OPT";
+}
+
+export function isAnswerMX(ans) {
+  return !util.emptyObj(ans) && ans.type === "MX";
+}
+
+export function isAnswerCAA(ans) {
+  return !util.emptyObj(ans) && ans.type === "CAA";
+}
+
+export function isAnswerSRV(ans) {
+  return !util.emptyObj(ans) && ans.type === "SRV";
+}
+
+export function isAnswerHINFO(ans) {
+  return !util.emptyObj(ans) && ans.type === "HINFO";
+}
+
+export function isAnswerSOA(ans) {
+  return !util.emptyObj(ans) && ans.type === "SOA";
+}
+
+export function isAnswerOPTION(ans) {
+  return !util.emptyObj(ans) && ans.type === "OPTION";
+}
+
+export function isAnswerA(ans) {
+  return !util.emptyObj(ans) && ans.type === "A";
+}
+
+export function isAnswerAAAA(ans) {
+  return !util.emptyObj(ans) && ans.type === "AAAA";
+}
+
+export function isCname(anspacket) {
+  return hasAnswers(anspacket) && isAnswerCname(anspacket.answers[0]);
 }
 
 export function isAnswerCname(ans) {
   return !util.emptyObj(ans) && ans.type === "CNAME";
 }
 
-export function isHttps(packet) {
-  return hasAnswers(packet) && isAnswerHttps(packet.answers[0]);
+export function isHttps(anspacket) {
+  return hasAnswers(anspacket) && isAnswerHttps(anspacket.answers[0]);
 }
 
 export function isAnswerHttps(ans) {
@@ -168,6 +322,25 @@ export function isAnswerHttps(ans) {
     !util.emptyString(ans.type) &&
     (ans.type === "HTTPS" || ans.type === "SVCB")
   );
+}
+
+export function isIPGrounded(ip) {
+  return ip === "0.0.0.0" || ip === "::";
+}
+
+export function isAnswerBlocked(ans) {
+  for (const a of ans) {
+    if (isIPGrounded(a.data)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isAnswerQuad0(packet) {
+  if (!isQueryBlockable(packet)) return false;
+  if (!hasAnswers(packet)) return false;
+  return isAnswerBlocked(packet.answers);
 }
 
 export function extractDomains(dnsPacket) {
@@ -207,6 +380,104 @@ export function extractDomains(dnsPacket) {
   return [...names];
 }
 
+export function getInterestingAnswerData(packet, maxlen = 80, delim = "|") {
+  if (!hasAnswers(packet)) {
+    return !util.emptyObj(packet) ? packet.rcode || "WTF" : "WTF";
+  }
+
+  // set to true if at least one ip has been captured from ans
+  let atleastoneip = false;
+  let str = "";
+  for (const a of packet.answers) {
+    // gather twice the maxlen to capture as much as possible:
+    // ips are usually prepend to the front, and going 2 times
+    // over maxlen (chosen arbitrarily) maximises chances of
+    // capturing IPs in A / AAAA records appearing later in ans
+    if (atleastoneip && str.length > maxlen) break;
+    if (!atleastoneip && str.length > maxlen * 2) break;
+
+    if (isAnswerA(a) || isAnswerAAAA(a)) {
+      const dat = a.data || "";
+      // prepend A / AAAA data
+      if (!util.emptyString(dat)) str = dat + delim + str;
+      atleastoneip = true;
+    } else if (isAnswerOPTION(a) || isAnswerNS(a) || isAnswerTXT(a)) {
+      // ns: github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L249
+      // txt: github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L370
+      // opt: github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L773
+      const dat = a.data || "";
+      if (!util.emptyString(dat)) str += dat + delim;
+    } else if (isAnswerSOA(a)) {
+      // github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L284
+      str += a.data.mname + delim;
+    } else if (isAnswerHINFO(a)) {
+      // github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L450
+      str += a.data.os + delim;
+      break;
+    } else if (isAnswerSRV(a)) {
+      // github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L521
+      str += a.data.target + delim;
+    } else if (isAnswerCAA(a)) {
+      // github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L574
+      str += a.data.value + delim;
+    } else if (isAnswerMX(a)) {
+      // github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L618
+      str += a.data.exchange + delim;
+    } else if (isAnswerRP(a)) {
+      // github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L1027
+      str += a.data.mbox + delim;
+      break;
+    } else if (isAnswerHttps(a)) {
+      // https/svcb answers may have a A / AAAA records
+      // github.com/serverless-dns/dns-parser/blob/b7d73b3d/index.js#L1381
+      const t = a.data.targetName;
+      const kv = a.data.svcParams;
+      if (t === ".") {
+        if (util.emptyObj(kv)) continue;
+        // if svcb/https is self-referential, then prepend ip hints, if any
+        if (
+          !util.emptyArray(kv.ipv4hint) &&
+          !util.emptyString(kv.ipv4hint[0])
+        ) {
+          str = kv.ipv4hint[0] + delim + str;
+          atleastoneip = true;
+        }
+        if (
+          !util.emptyArray(kv.ipv6hint) &&
+          !util.emptyString(kv.ipv6hint[0])
+        ) {
+          str = kv.ipv6hint[0] + delim + str;
+          atleastoneip = true;
+        }
+      } else {
+        str += t + delim;
+      }
+    } else if (isAnswerDNSKEY(a)) {
+      // github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L914
+      str += bufutil.bytesToBase64Url(a.data.key) + delim;
+      break;
+    } else if (isAnswerDS(a)) {
+      // ds: github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L1279
+      str += bufutil.bytesToBase64Url(a.data.digest) + delim;
+      break;
+    } else if (isAnswerRRSIG(a)) {
+      // rrsig: github.com/mafintosh/dns-packet/blob/31d3caf3/index.js#L984
+      str += bufutil.bytesToBase64Url(a.data.signature) + delim;
+      break;
+    } else if (isAnswerCname(a)) {
+      str += a.data + delim;
+    } else {
+      // unhanlded types:
+      // null, ptr, ds, nsec, nsec3, nsec3param, tlsa, sshfp, spf, dname
+      break;
+    }
+  }
+
+  const trunc = util.strstr(str, 0, maxlen);
+  const idx = trunc.lastIndexOf(delim);
+  return idx >= 0 ? util.strstr(trunc, 0, idx) : trunc;
+}
+
 export function dohStatusCode(b) {
   if (!b || !b.byteLength) return 412;
   if (b.byteLength > maxDNSPacketSize) return 413;
@@ -215,9 +486,19 @@ export function dohStatusCode(b) {
 }
 
 export function getQueryName(questions) {
+  if (util.emptyArray(questions)) return false;
+
   const qn = normalizeName(questions[0].name);
 
   return util.emptyString(qn) ? false : qn;
+}
+
+export function getQueryType(packet) {
+  if (!hasSingleQuestion(packet)) return false;
+
+  const qt = packet.questions[0].type;
+
+  return util.emptyString(qt) ? false : qt;
 }
 
 export function normalizeName(n) {

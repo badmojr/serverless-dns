@@ -4,10 +4,13 @@ set -eu
 
 # this script is for development/test runs only
 # defaults: stackoverflow.com/a/16753536
+jobfile="${1:-/tmp/sdns-profiler-job-pids}"
 runtime="${1:-node}";
 profiler="${2:-$1}";
 waitsec="${3:-0}";
 qdoh="${QDOH:-invalid}";
+prestart=""
+proc0=""
 
 echo "run $runtime";
 
@@ -30,9 +33,19 @@ banner() {
 }
 
 cleanup() {
-    kill $(jobs -p)
+  # alt? unix.stackexchange.com/a/146770
+  # echo "sig... $proc0"
+  # kill -INT $proc0
+  # stackoverflow.com/a/51576504
+  jobs -p > jobfile
+  j=$(cat jobfile)
+  echo "kill... $j"
+  kill -INT $j
+  # does not work... jobs -p | xargs -r kill -9
+  rm jobfile
 }
-trap cleanup EXIT
+# davidpashley.com/articles/writing-robust-shell-scripts
+trap cleanup INT TERM EXIT
 
 bgcmd() {
   $1 &
@@ -93,18 +106,33 @@ if [ $runtime = "deno" ] || [ $runtime = "d" ]; then
            --allow-net \
            --allow-read \
            --allow-write \
-           --import-map=import_map.json \
            src/server-deno.ts";
 elif [ $runtime = "workers" ] || [ $runtime = "w" ]; then
   echo "note: wrangler v1.16+ required";
   echo "using `which wrangler`";
-  start="wrangler dev --verbose";
+  start="npx wrangler dev --local";
+elif [ $runtime = "fastly" ] || [ $runtime = "f" ]; then
+  echo "note: Fastly CLI required";
+  echo "using `which fastly`";
+  # developer.fastly.com/learning/compute/testing/#starting-the-server
+  start="fastly compute serve --skip-verification --verbose --file ./dist/fastly.wasm";
+elif [ $runtime = "fly" ] || [ $runtime = "ff" ]; then
+  prestart="npm run build:fly"
+  start="node --trace-warnings ./dist/fly.mjs"
 else
-  echo "note: nodejs v16+ required";
+  echo "note: nodejs v19+ required";
   echo "using `which node`";
   # verbose: NODE_DEBUG=http2,http,tls,net... ref: stackoverflow.com/a/46858827
   start="node --trace-warnings ./src/server-node.js";
 fi
+
+# prestart ceremony, if any
+if [ ! -z "$prestart" ]; then
+  $prestart
+fi
+
+# prevent stdin from early close on signals?
+# unix.stackexchange.com/a/672061
 
 if [ $profiler = "cpu" ]; then
   if [ $runtime != "node" ] && [ $runtime != "n" ]; then
@@ -116,6 +144,7 @@ if [ $profiler = "cpu" ]; then
   echo "profiler (cpu): press ctrl+c to open cpu flame graphs in a browser";
   profilerbanner;
   npx clinic flame -- $start
+  proc0=$!
 elif [ $profiler = "mem" ]; then
   if [ $runtime != "node" ] && [ $runtime != "n" ]; then
     echo "profiler (mem): only on node"
@@ -126,6 +155,7 @@ elif [ $profiler = "mem" ]; then
   echo "profiler (mem): press ctrl+c to open memory flame graphs in a browser"
   profilerbanner;
   npx clinic heapprofiler -- $start
+  proc0=$!
 elif [ $profiler = "fn" ]; then
   if [ $runtime != "node" ] && [ $runtime != "n" ]; then
     echo "profiler (fn): only on node"
@@ -136,6 +166,7 @@ elif [ $profiler = "fn" ]; then
   echo "profiler (fn): press ctrl+c to open func bubble graphs in a browser"
   profilerbanner;
   npx clinic bubbleprof -- $start
+  proc0=$!
 elif [ $profiler = "profile1" ] || [ $profiler = "p1" ]; then
   if [ $qdoh = "invalid" ]; then
     echo "Specify env QDOH path"
@@ -150,8 +181,9 @@ elif [ $profiler = "profile1" ] || [ $profiler = "p1" ]; then
     NODE_AVOID_FETCH=false \
     LOG_LEVEL=warn \
     $start &
+  proc0=$!
   sleep 1
-  reqs "$waitsec"
+  reqs "$waitsec" &
 elif [ $profiler = "profile2" ] || [ $profiler = "p2" ]; then
   if [ ${qdoh} = "invalid" ]; then
     echo "Specify env QDOH path"
@@ -166,8 +198,9 @@ elif [ $profiler = "profile2" ] || [ $profiler = "p2" ]; then
     NODE_AVOID_FETCH=true \
     LOG_LEVEL=warn \
     $start &
+  proc0=$!
   sleep 1
-  reqs "$waitsec"
+  reqs "$waitsec" &
 elif [ $profiler = "profile3" ] || [ $profiler = "p3" ]; then
   if [ ${qdoh} = "invalid" ]; then
     echo "Specify env QDOH path"
@@ -185,12 +218,16 @@ elif [ $profiler = "profile3" ] || [ $profiler = "p3" ]; then
     NODE_DOH_ONLY=false \
     LOG_LEVEL=warn \
     $start &
+  proc0=$!
   sleep 1
-  reqs "$waitsec"
+  reqs "$waitsec" &
 else
   banner;
   bgcmd "$start"
+  proc0=$!
 fi
 
-wait
-
+# list all bg jobs
+jobs -l
+# wait for the main job to finish
+wait $proc0

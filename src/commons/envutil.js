@@ -20,10 +20,24 @@ export function machinesTimeoutMillis() {
   return envManager.get("MACHINES_TIMEOUT_SEC") * 1000;
 }
 
+// only valid on Fly Machines
+export function httpCheck() {
+  if (!envManager) return false;
+  if (!onFly()) return false;
+
+  return envManager.get("MACHINES_TIMEOUT_SEC") > 0;
+}
+
 export function onDenoDeploy() {
   if (!envManager) return false;
 
   return envManager.get("CLOUD_PLATFORM") === "deno-deploy";
+}
+
+export function onFastly() {
+  if (!envManager) return false;
+
+  return envManager.get("CLOUD_PLATFORM") === "fastly";
 }
 
 export function onCloudflare() {
@@ -37,7 +51,7 @@ export function onCloudflare() {
 export function onLocal() {
   if (!envManager) return false;
 
-  return !onFly() && !onDenoDeploy() && !onCloudflare();
+  return !onFly() && !onDenoDeploy() && !onCloudflare() && !onFastly();
 }
 
 export function hasDisk() {
@@ -46,7 +60,7 @@ export function hasDisk() {
 }
 
 export function hasDynamicImports() {
-  if (onDenoDeploy() || onCloudflare()) return false;
+  if (onDenoDeploy() || onCloudflare() || onFastly()) return false;
   return true;
 }
 
@@ -57,19 +71,25 @@ export function hasHttpCache() {
 export function isWorkers() {
   if (!envManager) return false;
 
-  return envManager.get("RUNTIME") === "worker";
+  return envManager.r() === "worker";
+}
+
+export function isFastly() {
+  if (!envManager) return false;
+
+  return envManager.r() === "fastly";
 }
 
 export function isNode() {
   if (!envManager) return false;
 
-  return envManager.get("RUNTIME") === "node";
+  return envManager.r() === "node";
 }
 
 export function isDeno() {
   if (!envManager) return false;
 
-  return envManager.get("RUNTIME") === "deno";
+  return envManager.r() === "deno";
 }
 
 export function workersTimeout(missing = 0) {
@@ -82,24 +102,14 @@ export function downloadTimeout(missing = 0) {
   return envManager.get("CF_BLOCKLIST_DOWNLOAD_TIMEOUT") || missing;
 }
 
+export function bgDownloadBlocklistWrapper() {
+  if (!envManager) return false;
+  return onCloudflare();
+}
+
 export function blocklistUrl() {
   if (!envManager) return null;
   return envManager.get("CF_BLOCKLIST_URL");
-}
-
-export function timestamp() {
-  if (!envManager) return null;
-  return envManager.get("CF_LATEST_BLOCKLIST_TIMESTAMP");
-}
-
-export function tdNodeCount() {
-  if (!envManager) return null;
-  return envManager.get("TD_NODE_COUNT");
-}
-
-export function tdParts() {
-  if (!envManager) return null;
-  return envManager.get("TD_PARTS");
 }
 
 export function primaryDohResolver() {
@@ -114,6 +124,23 @@ export function secondaryDohResolver() {
   return envManager.get("CF_DNS_RESOLVER_URL_2");
 }
 
+export function cfAccountId() {
+  if (!envManager) return "";
+  // a secret
+  return envManager.get("CF_ACCOUNT_ID") || "";
+}
+
+export function cfApiToken() {
+  if (!envManager) return "";
+  // a secret
+  return envManager.get("CF_API_TOKEN") || "";
+}
+
+export function maxDohUrl() {
+  if (!envManager) return null;
+  return envManager.get("MAX_DNS_RESOLVER_URL");
+}
+
 export function dohResolvers() {
   if (!envManager) return null;
 
@@ -124,6 +151,11 @@ export function dohResolvers() {
   }
 
   return [primaryDohResolver()];
+}
+
+export function geoipUrl() {
+  if (!envManager) return null;
+  return envManager.get("GEOIP_URL");
 }
 
 export function tlsCrtPath() {
@@ -193,10 +225,20 @@ export function dotCleartextBackendPort() {
   return isCleartext() ? 10555 : /* random*/ 0;
 }
 
+export function httpCheckPort() {
+  return 8888;
+}
+
 export function profileDnsResolves() {
   if (!envManager) return false;
 
   return envManager.get("PROFILE_DNS_RESOLVES") || false;
+}
+
+export function accessKeys() {
+  if (!envManager) return "";
+
+  return envManager.get("ACCESS_KEYS") || null;
 }
 
 export function forceDoh() {
@@ -216,7 +258,7 @@ export function avoidFetch() {
   if (!isNode()) return false;
 
   // on node, default to avoiding fetch
-  return envManager.get("NODE_AVOID_FETCH") || true;
+  return envManager.get("NODE_AVOID_FETCH") || false;
 }
 
 export function disableDnsCache() {
@@ -233,6 +275,60 @@ export function disableBlocklists() {
   return envManager.get("DISABLE_BLOCKLISTS") || false;
 }
 
+export function blockSubdomains() {
+  if (!envManager) return true;
+
+  return envManager.get("BLOCK_SUBDOMAINS") || true;
+}
+
+// recurisve resolver on Fly
+export function recursive() {
+  return onFly();
+}
+
+export function logpushHostnameAsLogid() {
+  if (!envManager) return false;
+
+  return envManager.get("LOGPUSH_HOSTNAME_AS_LOGID") || false;
+}
+
+// returns a set of subdomains on which logpush is enabled
+export function logpushSources() {
+  if (!envManager) return null;
+
+  const csv = envManager.get("LOGPUSH_SRC") || null;
+  if (onCloudflare() || onLocal()) return csv;
+
+  return null;
+}
+
+export function logpushPath() {
+  if (!envManager) return "";
+
+  const path = envManager.get("CF_LOGPUSH_R2_PATH") || "";
+  if (onCloudflare() || onLocal()) return path;
+
+  return "";
+}
+
+export function logpushAccessKey() {
+  if (!envManager) return "";
+
+  const accesskey = envManager.get("CF_LOGPUSH_R2_ACCESS_KEY") || "";
+  if (onCloudflare() || onLocal()) return accesskey;
+
+  return "";
+}
+
+export function logpushSecretKey() {
+  if (!envManager) return "";
+
+  const secretkey = envManager.get("CF_LOGPUSH_R2_SECRET_KEY") || "";
+  if (onCloudflare() || onLocal()) return secretkey;
+
+  return "";
+}
+
 export function gwip4() {
   return envManager.get("GW_IP4") || "";
 }
@@ -243,4 +339,20 @@ export function gwip6() {
 
 export function region() {
   return envManager.get("FLY_REGION") || "";
+}
+
+export function metrics() {
+  const nobinding = [null, null];
+
+  if (!envManager) return nobinding;
+
+  // match the binding names as in wrangler.toml
+  if (onCloudflare()) {
+    return [
+      envManager.get("METRICS") || null,
+      envManager.get("BL_METRICS") || null,
+    ];
+  }
+
+  return nobinding;
 }

@@ -12,11 +12,11 @@
 import { uid, stub } from "../commons/util.js";
 
 /**
- * @typedef {'error'|'warn'|'info'|'timer'|'debug'} LogLevels
+ * @typedef {'error'|'logpush'|'warn'|'info'|'timer'|'debug'} LogLevels
  */
 
-// high "error" (4); low "debug" (0)
-const _LOG_LEVELS = new Set(["error", "warn", "info", "timer", "debug"]);
+// high "error" (4); low "debug" (0);
+const LEVELS = new Set(["error", "logpush", "warn", "info", "timer", "debug"]);
 
 /**
  * Configure console level.
@@ -30,6 +30,7 @@ const _LOG_LEVELS = new Set(["error", "warn", "info", "timer", "debug"]);
 function _setConsoleLevel(level) {
   switch (level) {
     case "error":
+    case "logpush":
       globalThis.console.warn = stub();
     case "warn":
       globalThis.console.info = stub();
@@ -46,7 +47,7 @@ function _setConsoleLevel(level) {
       level = null;
   }
   if (level) {
-    console.log("Console level set: ", level);
+    // console.log("Console level set: ", level);
     globalThis.console.level = level;
   }
   return level;
@@ -59,13 +60,16 @@ export default class Log {
    * Default='debug', so as default instance (`new Log()`) is a pure alias.
    * If console level has been set, log level cannot be lower than it.
    * @param {{
-   * level: string,
+   * level: LogLevels,
    * levelize: boolean,
    * withTimestamps: boolean
    * }} - options
    */
   constructor({ level = "debug", levelize = false, withTimestamps = false }) {
-    if (!_LOG_LEVELS.has(level)) level = "debug";
+    level = level.toLowerCase();
+    if (!LEVELS.has(level)) level = "debug";
+    // if logpush, then levlelize to stub out all but error and logpush logs
+    if (level === "logpush") levelize = true;
     if (levelize && !console.level) _setConsoleLevel(level);
 
     this.l = console.log;
@@ -148,7 +152,8 @@ export default class Log {
    * @param {LogLevels} level
    */
   setLevel(level) {
-    if (!_LOG_LEVELS.has(level)) throw new Error(`Unknown log level: ${level}`);
+    level = level.toLowerCase();
+    if (!LEVELS.has(level)) throw new Error(`Unknown log level: ${level}`);
 
     this._resetLevel();
 
@@ -158,13 +163,13 @@ export default class Log {
         this.d = console.debug;
         this.debug = console.debug;
       case "timer":
-        this.lapTime = console.timeLog;
+        this.lapTime = console.timeLog || stub(); // Stubbing required for Fastly as they do not currently support this method.
         this.startTime = function (name) {
-          name += uid();
-          console.time(name);
+          name = uid(name);
+          if (console.time) console.time(name);
           return name;
         };
-        this.endTime = console.timeEnd;
+        this.endTime = console.timeEnd || stub(); // Stubbing required for Fastly as they do not currently support this method.
       case "info":
         this.i = console.info;
         this.info = console.info;
@@ -172,10 +177,11 @@ export default class Log {
         this.w = console.warn;
         this.warn = console.warn;
       case "error":
+      case "logpush":
         this.e = console.error;
         this.error = console.error;
     }
-
+    console.debug("Log level set: ", level);
     this.level = level;
   }
 }

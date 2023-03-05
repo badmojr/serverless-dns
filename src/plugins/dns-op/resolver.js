@@ -6,6 +6,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 import { DnsBlocker } from "./blocker.js";
+import * as pres from "../plugin-response.js";
 import * as rdnsutil from "../rdns-util.js";
 import * as cacheutil from "../cache-util.js";
 import * as dnsutil from "../../commons/dnsutil.js";
@@ -14,13 +15,19 @@ import * as util from "../../commons/util.js";
 import * as envutil from "../../commons/envutil.js";
 
 export default class DNSResolver {
+  /**
+   * @param {import("../rethinkdns/main.js").BlocklistWrapper} blocklistWrapper
+   * @param {import("./cache.js").DnsCache} cache
+   */
   constructor(blocklistWrapper, cache) {
+    /** @type {import("./cache.js").DnsCache} */
     this.cache = cache;
+    this.blocker = new DnsBlocker();
+    /** @type {import("../rethinkdns/main.js").BlocklistWrapper} */
+    this.bw = blocklistWrapper;
     this.http2 = null;
     this.nodeutil = null;
     this.transport = null;
-    this.blocker = new DnsBlocker();
-    this.bw = blocklistWrapper;
     this.log = log.withTags("DnsResolver");
 
     this.measurements = [];
@@ -28,6 +35,18 @@ export default class DNSResolver {
     // only valid on nodejs
     this.forceDoh = envutil.forceDoh();
     this.avoidFetch = envutil.avoidFetch();
+
+    // only valid on workers
+    // bg-bw-init results in higher io-wait, not lower
+    // p99 gb-sec (0.04 => 0.06); p99.9 gb-sec (0.09 => 0.14)
+    // also: from commit 35a557efe69e (14 Nov 2022) to 6b9a2e9f (25 Nov 2022)
+    // the cpu time has gone up for p50 ms (2.2 => 2.7); p75 (3.9 => 6.6);
+    // p99 (21.2 => 31.5); p99.9 (60 => 72.2); p50 gb-sec (.002 => .003)
+    // p75 (.004 => .007); p99 (.026 => .039); p99.9 (.069 => .126)
+    // it turned out that the trie-cache wasn't being used at all due to
+    // a missing version bump (npm update fixed it).
+    this.bgBwInit = envutil.bgDownloadBlocklistWrapper();
+    this.maxDoh = envutil.maxDohUrl();
 
     if (this.profileResolve) {
       this.log.w("profiling", this.determineDohResolvers());
@@ -38,20 +57,26 @@ export default class DNSResolver {
   async lazyInit() {
     if (!envutil.hasDynamicImports()) return;
 
-    if (envutil.isNode() && !this.http2) {
+    const isnode = envutil.isNode();
+    const plainOldDnsIp = dnsutil.dnsaddr();
+    if (isnode && !this.http2) {
       this.http2 = await import("http2");
-      this.log.i("created custom http2 client");
+      this.log.i("imported custom http2 client");
     }
-    if (envutil.isNode() && !this.nodeutil) {
+    if (isnode && !this.nodeutil) {
       this.nodeutil = await import("../../core/node/util.js");
       this.log.i("imported node-util");
     }
-    if (envutil.isNode() && !this.transport) {
-      const plainOldDnsIp = dnsutil.dnsaddr();
-      this.transport = new (
-        await import("../../core/node/dns-transport.js")
-      ).Transport(plainOldDnsIp, 53);
-      this.log.i("created udp/tcp dns transport", plainOldDnsIp);
+    if (isnode && !this.transport) {
+      // awaiting on dns-transport takes a tad longer that more than 1 event
+      // awaiting lazyInit() trigger this part of the code and end up
+      // initializing multiple transports. This reproduces easily when 100+
+      // requests arrive at once.
+      const dnst = await import("../../core/node/dns-transport.js");
+      if (this.transport == null) {
+        this.transport = dnst.makeTransport(plainOldDnsIp, 53);
+        this.log.i("imported udp/tcp dns transport", plainOldDnsIp);
+      }
     }
   }
 
@@ -61,34 +86,37 @@ export default class DNSResolver {
   }
 
   /**
-   * @param {Object} param
-   * @param {String} param.rxid
-   * @param {Request} param.request
-   * @param {ArrayBuffer} param.requestBodyBuffer
-   * @param {String} param.userDnsResolverUrl
-   * @param {Object} param.requestDecodedDnsPacket
-   * @returns
+   * @param {Object} ctx
+   * @param {String} ctx.rxid
+   * @param {Request} ctx.request
+   * @param {ArrayBuffer} ctx.requestBodyBuffer
+   * @param {Object} ctx.requestDecodedDnsPacket
+   * @param {Object} ctx.userBlocklistInfo
+   * @param {String} ctx.userDnsResolverUrl
+   * @param {string} ctx.userBlockstamp
+   * @param {function(function):void} ctx.dispatcher
+   * @returns {Promise<pres.RResp>}
    */
-  async RethinkModule(param) {
+  async exec(ctx) {
     await this.lazyInit();
-    let response = util.emptyResponse();
+    let response = pres.emptyResponse();
 
     try {
-      response.data = await this.resolveDns(param);
+      response.data = await this.resolveDns(ctx);
     } catch (e) {
-      response = util.errResponse("dnsResolver", e);
-      this.log.e(param.rxid, "main", e.stack);
+      response = pres.errResponse("dnsResolver", e);
+      this.log.e(ctx.rxid, "main", e.stack);
     }
 
     return response;
   }
 
-  determineDohResolvers(preferredByUser) {
+  determineDohResolvers(preferredDoh, forceDoh = this.forceDoh) {
     // when this.transport is set, do not use doh unless forced
-    if (this.transport && !this.forceDoh) return [];
+    if (this.transport && !forceDoh) return [];
 
-    if (!util.emptyString(preferredByUser)) {
-      return [preferredByUser];
+    if (!util.emptyString(preferredDoh)) {
+      return [preferredDoh];
     }
 
     // if blocklists aren't setup, return only primary because blocklists
@@ -125,16 +153,30 @@ export default class DNSResolver {
     this.log.qEnd("p99/99.9/99.99/100", p99, p999, p9999, p100);
   }
 
-  async resolveDns(param) {
-    const rxid = param.rxid;
-    const blInfo = param.userBlocklistInfo;
-    const rawpacket = param.requestBodyBuffer;
-    const decodedpacket = param.requestDecodedDnsPacket;
-    const userDns = param.userDnsResolverUrl;
-    const dispatcher = param.dispatcher;
+  /**
+   * @param {Object} ctx
+   * @param {String} ctx.rxid
+   * @param {Request} ctx.request
+   * @param {ArrayBuffer} ctx.requestBodyBuffer
+   * @param {Object} ctx.requestDecodedDnsPacket
+   * @param {Object} ctx.userBlocklistInfo
+   * @param {String} ctx.userDnsResolverUrl
+   * @param {string} ctx.userBlockstamp
+   * @param {function(function):void} ctx.dispatcher
+   * @returns {Promise<pres.RResp>}
+   */
+  async resolveDns(ctx) {
+    const rxid = ctx.rxid;
+    const req = ctx.request;
+    const blInfo = ctx.userBlocklistInfo;
+    const rawpacket = ctx.requestBodyBuffer;
+    const decodedpacket = ctx.requestDecodedDnsPacket;
+    const userDns = ctx.userDnsResolverUrl;
+    const dispatcher = ctx.dispatcher;
+    const userBlockstamp = ctx.userBlockstamp;
     // may be null or empty-obj (stamp then needs to be got from blf)
     // may be a obj { domainName: String -> blockstamps: Uint16Array }
-    const stamps = param.domainBlockstamp;
+    const stamps = ctx.domainBlockstamp;
 
     let blf = this.bw.getBlocklistFilter();
     const isBlfDisabled = this.bw.disabled();
@@ -158,26 +200,51 @@ export default class DNSResolver {
       resolveStart = Date.now();
     }
 
-    // nested async calls (async fn calling another async fn)
-    // need to await differently depending on what's returned:
-    // case1:
-    // fulfiller = async () => { return "123"; }
-    // wrapper = async () => { return fulfiller(); }
-    // result = await wrapper() :: outputs "123"
-    // case2:
-    // arrayWrapper = async () => { return [fulfiller()]; }
-    // result1 = await arrayWrapper() :: outputs "Array[Promise{}]"
-    // result2 = await result1[0] :: outputs "123"
-    const promisedTasks = await Promise.all([
-      this.bw.init(rxid),
-      this.resolveDnsUpstream(
-        rxid,
-        param.request,
-        this.determineDohResolvers(userDns),
-        rawpacket,
-        decodedpacket
-      ),
-    ]);
+    let fromMax = false;
+    let promisedTasks = null;
+    if (!isBlfSetup && this.bgBwInit) {
+      const alt = this.ofMax(userBlockstamp);
+      fromMax = true;
+      this.log.d(rxid, "bg-bw-init; upstream to max", alt);
+      dispatcher(this.bw.init(rxid));
+      promisedTasks = await Promise.allSettled([
+        Promise.resolve(), // placeholder promise that never rejects
+        this.resolveDnsUpstream(
+          rxid,
+          req,
+          this.determineDohResolvers(alt, /* forceDoh */ true),
+          rawpacket,
+          decodedpacket
+        ),
+      ]);
+    } else {
+      // nested async calls (async fn calling another async fn)
+      // need to await differently depending on what's returned:
+      // case1:
+      // fulfiller = async () => { return "123"; }
+      // wrapper = async () => { return fulfiller(); }
+      // result = await wrapper() :: outputs "123"
+      // case2:
+      // arrayWrapper = async () => { return [fulfiller()]; }
+      // result1 = await arrayWrapper() :: outputs "Array[Promise{}]"
+      // result2 = await result1[0] :: outputs "123"
+      promisedTasks = await Promise.allSettled([
+        this.bw.init(rxid),
+        this.resolveDnsUpstream(
+          rxid,
+          req,
+          this.determineDohResolvers(userDns),
+          rawpacket,
+          decodedpacket
+        ),
+      ]);
+    }
+
+    for (const task of promisedTasks) {
+      if (task.status === "rejected") {
+        throw new Error(`task rejected ${task.reason}`);
+      } // else: task.status === "fulfilled"
+    }
 
     if (this.profileResolve) {
       resolveEnd = Date.now();
@@ -185,14 +252,19 @@ export default class DNSResolver {
       this.logMeasurementsPeriodically();
     }
 
-    const res = promisedTasks[1];
+    // developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/allSettled#return_value
+    const res = promisedTasks[1].value;
 
-    if (!isBlfDisabled && !isBlfSetup) {
+    if (fromMax) {
+      // blf would be eventually be init'd in the background
+      isBlfSetup = true;
+    } else if (!isBlfSetup && !isBlfDisabled) {
       this.log.d(rxid, "blocklist-filter downloaded and setup");
       blf = this.bw.getBlocklistFilter();
       isBlfSetup = rdnsutil.isBlocklistFilterSetup(blf);
     } else {
-      isBlfSetup = true; // override, as blocklists disabled
+      // override, as blocklists disabled
+      isBlfSetup = true;
     }
 
     if (!isBlfSetup) throw new Error(rxid + " no blocklist-filter");
@@ -200,7 +272,7 @@ export default class DNSResolver {
 
     if (!res.ok) {
       const txt = res.text && (await res.text());
-      this.log.d(rxid, "!OK", res, txt);
+      this.log.d(rxid, "!OK", res.status, txt);
       throw new Error(txt + " http err: " + res);
     }
 
@@ -208,13 +280,15 @@ export default class DNSResolver {
 
     const r = await this.makeRdnsResponse(rxid, ans, blf, stamps);
 
+    // blockAnswer is a no-op if the ans is already quad0
     // check outgoing cached dns-packet against blocklists
     this.blocker.blockAnswer(rxid, /* out*/ r, blInfo);
     const fromCache = cacheutil.hasCacheHeader(res.headers);
     this.log.d(rxid, "ans block?", r.isBlocked, "from cache?", fromCache);
 
-    // res was already fetched from caches...
-    if (!fromCache) {
+    // if res was got from caches or if res was got from max doh (ie, blf
+    // wasn't used to retrieve stamps), then skip hydrating the cache
+    if (!fromCache && !fromMax) {
       this.primeCache(rxid, r, dispatcher);
     }
     return r;
@@ -232,7 +306,7 @@ export default class DNSResolver {
       ? rdnsutil.blockstampFromBlocklistFilter(dnsPacket, blf)
       : stamps;
 
-    return rdnsutil.dnsResponse(dnsPacket, raw, stamps);
+    return pres.dnsResponse(dnsPacket, raw, stamps);
   }
 
   primeCache(rxid, r, dispatcher) {
@@ -251,6 +325,11 @@ export default class DNSResolver {
 
     this.cache.put(k, v, dispatcher);
   }
+
+  ofMax(blockstamp) {
+    if (util.emptyString(blockstamp)) return this.maxDoh;
+    else return this.maxDoh + blockstamp;
+  }
 }
 
 /**
@@ -258,7 +337,8 @@ export default class DNSResolver {
  * @param {Request} request
  * @param {Array} resolverUrls
  * @param {ArrayBuffer} query
- * @returns
+ * @param {any} packet
+ * @returns {Promise<Response|Error>}
  */
 DNSResolver.prototype.resolveDnsUpstream = async function (
   rxid,

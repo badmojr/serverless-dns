@@ -9,75 +9,63 @@ import { rbase32 } from "../commons/b32.js";
 import * as util from "../commons/util.js";
 import * as bufutil from "../commons/bufutil.js";
 import * as dnsutil from "../commons/dnsutil.js";
+import * as envutil from "../commons/envutil.js";
+import * as pres from "./plugin-response.js";
+import * as trie from "@serverless-dns/trie/stamp.js";
+import { BlocklistFilter } from "./rethinkdns/filter.js";
 
 // doh uses b64url encoded blockstamp, while dot uses lowercase b32.
 const _b64delim = ":";
 const _b32delim = "-";
+// begins with l, followed by b64delim or b32delim
+export const logPrefix = new RegExp(`^l${_b64delim}|^l${_b32delim}`);
+// begins with a digit, followed by b64delim or b32delim
+export const stampPrefix = new RegExp(`^\\d+${_b64delim}|^\\d+${_b32delim}`);
 
-// TODO: wildcard list should be fetched from S3/KV
+const emptystr = "";
+// delim, version, blockstamp (flag), accesskey
+const emptystamp = [emptystr, emptystr, emptystr, emptystr];
+
+// deprecated: all lists are trreated as wildcards
 const _wildcardUint16 = new Uint16Array([
   64544, 18431, 8191, 65535, 64640, 1, 128, 16320,
 ]);
 
-export function wildcards() {
-  return _wildcardUint16;
-}
+// pec: parental control, rec: recommended, sec: security
+const recBlockstamps = new Map();
+// oisd, 1hosts:mini, cpbl:light, anudeep, yhosts, tiuxo, adguard
+recBlockstamps.set("rec", "1:YAYBACABEDAgAA==");
+// nocoin, malware (url haus), security (stevenblack), kadhosts (polish), inversion,
+// spam404, notrack (malware), baddboyz (michael krogza), malware (michael krogza),
+// malware (rpi), threats (hagezi), malware (oblat), phishing (oblat), red flag domains,
+// malware (dandelion), blackbook, scams (infinitec), malware (rescure), nso (amnesty),
+// global anti-scam (inversion), scamware (shadowwhisperer), covid list (rescure),
+// cryptojacking (tblp), ransomware (tblp), threats (osint)
+recBlockstamps.set("sec", "1:EBx5AqvtyDcAKA==");
+// prevent bypass, safe search, dating (olbat), gambling (olbat), gambling (hostvn),
+// gambling (sinfonietta), adult (tuixo), adult (stevenblack), nsfw (oisd),
+// drugs (tblp), vaping (tblp), adult (tblp), 1hosts (kidsaf), vaping (tblp),
+// nsfl (shadowwhisperer), adult (shadowwhisperer)
+recBlockstamps.set("pec", "1:GMAB-ACgYVIAgA==");
+// rec, sec
+recBlockstamps.set("rs", "1:cB55AqvtyTcgARAwIAAAKA==");
+// pec, rec, sec
+recBlockstamps.set("prs", "1:eN4B-ACgeQKr7ck3IAEQMCAAYXoAgA==");
+// pec, rec
+recBlockstamps.set("pr", "1:eMYB-ACgAQAgARAwIABhUgCA");
+// pec, sec
+recBlockstamps.set("ps", "1:GNwB-ACgeQKr7cg3YXoAgA==");
 
 export function isBlocklistFilterSetup(blf) {
-  return blf && !util.emptyObj(blf.t) && !util.emptyObj(blf.ft);
+  return blf && !util.emptyObj(blf.ftrie);
 }
 
-export function dnsResponse(packet = null, raw = null, stamps = null) {
-  if (util.emptyObj(packet) || bufutil.emptyBuf(raw)) {
-    throw new Error("empty packet for dns-res");
-  }
-  return {
-    isBlocked: false,
-    flag: "",
-    dnsPacket: packet,
-    dnsBuffer: raw,
-    stamps: stamps || {},
-  };
+export function isStampQuery(p) {
+  return stampPrefix.test(p);
 }
 
-export function copyOnlyBlockProperties(to, from) {
-  to.isBlocked = from.isBlocked;
-  to.flag = from.flag;
-
-  return to;
-}
-
-export function rdnsNoBlockResponse(
-  flag = "",
-  packet = null,
-  raw = null,
-  stamps = null
-) {
-  return {
-    isBlocked: false,
-    flag: flag || "",
-    dnsPacket: packet,
-    dnsBuffer: raw,
-    stamps: stamps || {},
-  };
-}
-
-export function rdnsBlockResponse(
-  flag,
-  packet = null,
-  raw = null,
-  stamps = null
-) {
-  if (util.emptyString(flag)) {
-    throw new Error("no flag set for block-res");
-  }
-  return {
-    isBlocked: true,
-    flag: flag,
-    dnsPacket: packet,
-    dnsBuffer: raw,
-    stamps: stamps || {},
-  };
+export function isLogQuery(p) {
+  return logPrefix.test(p);
 }
 
 // dn         -> domain name, ex: you.and.i.example.com
@@ -87,7 +75,9 @@ export function rdnsBlockResponse(
 //               {string(sub/domain-name) : string(blocklist-stamp) }
 // FIXME: return block-dnspacket depending on altsvc/https/svcb or cname/a/aaaa
 export function doBlock(dn, userBlInfo, dnBlInfo) {
-  const noblock = rdnsNoBlockResponse();
+  const blockSubdomains = envutil.blockSubdomains();
+  const version = userBlInfo.flagVersion;
+  const noblock = pres.rdnsNoBlockResponse();
   if (
     util.emptyString(dn) ||
     util.emptyObj(dnBlInfo) ||
@@ -96,27 +86,31 @@ export function doBlock(dn, userBlInfo, dnBlInfo) {
     return noblock;
   }
 
+  // treat every blocklist as a wildcard blocklist
+  if (blockSubdomains) {
+    return applyWildcardBlocklists(
+      userBlInfo.userBlocklistFlagUint,
+      version,
+      dnBlInfo,
+      dn
+    );
+  }
+
   const dnUint = new Uint16Array(dnBlInfo[dn]);
-
+  // if the domain isn't in block-info, we're done
   if (util.emptyArray(dnUint)) return noblock;
-
-  const r = applyBlocklists(
-    userBlInfo.userBlocklistFlagUint,
-    dnUint,
-    userBlInfo.flagVersion
-  );
+  // else, determine if user selected blocklist intersect with the domain's
+  const r = applyBlocklists(userBlInfo.userBlocklistFlagUint, dnUint, version);
 
   // if response is blocked, we're done
   if (r.isBlocked) return r;
-
-  // TODO: treat every list as a wildcard list?
   // if user-blockstamp doesn't contain any wildcard blocklists, we're done
   if (util.emptyArray(userBlInfo.userServiceListUint)) return r;
 
   // check if any subdomain is in blocklists that is also in user-blockstamp
   return applyWildcardBlocklists(
     userBlInfo.userServiceListUint,
-    userBlInfo.flagVersion,
+    version,
     dnBlInfo,
     dn
   );
@@ -131,6 +125,11 @@ export function blockstampFromCache(cr) {
   return m.stamps;
 }
 
+/**
+ * @param {*} dnsPacket
+ * @param {BlocklistFilter} blocklistFilter
+ * @returns {any|boolean}
+ */
 export function blockstampFromBlocklistFilter(dnsPacket, blocklistFilter) {
   if (util.emptyObj(dnsPacket)) return false;
   if (!isBlocklistFilterSetup(blocklistFilter)) return false;
@@ -157,7 +156,9 @@ function applyWildcardBlocklists(uint1, flagVersion, dnBlInfo, dn) {
 
   // iterate through all subdomains one by one, for ex: a.b.c.ex.com:
   // 1st: a.b.c.ex.com; 2nd: b.c.ex.com; 3rd: c.ex.com; 4th: ex.com; 5th: .com
-  while (dnSplit.shift() !== undefined) {
+  do {
+    if (util.emptyArray(dnSplit)) break;
+
     const subdomain = dnSplit.join(".");
     const subdomainUint = dnBlInfo[subdomain];
 
@@ -170,9 +171,9 @@ function applyWildcardBlocklists(uint1, flagVersion, dnBlInfo, dn) {
     if (!util.emptyObj(response) && response.isBlocked) {
       return response;
     }
-  }
+  } while (dnSplit.shift() != null);
 
-  return rdnsNoBlockResponse();
+  return pres.rdnsNoBlockResponse();
 }
 
 function applyBlocklists(uint1, uint2, flagVersion) {
@@ -181,10 +182,10 @@ function applyBlocklists(uint1, uint2, flagVersion) {
 
   if (blockedUint) {
     // incoming user-blockstamp intersects with domain-blockstamp
-    return rdnsBlockResponse(getB64Flag(blockedUint, flagVersion));
+    return pres.rdnsBlockResponse(getB64Flag(blockedUint, flagVersion));
   } else {
     // domain-blockstamp exists but no intersection with user-blockstamp
-    return rdnsNoBlockResponse(getB64Flag(uint2, flagVersion));
+    return pres.rdnsNoBlockResponse(getB64Flag(uint2, flagVersion));
   }
 }
 
@@ -266,38 +267,97 @@ export function getB64Flag(uint16Arr, flagVersion) {
 }
 
 /**
+ * Get msg key from `Request` URL
+ * @param {string} u
+ * @returns {string} k
+ */
+export function msgkeyFromUrl(u) {
+  const ans = extractStamps(u);
+  // accesskey is at index 3
+  return ans[3];
+}
+
+/**
  * Get the blocklist flag from `Request` URL
- * DNS over TLS flag from SNI should be rewritten to `url`'s pathname
- * @param {String} url - Request URL string
- * @returns
+ * DNS over TLS flag from SNI is yanked into `url`'s pathname
+ * @param {string} u
+ * @returns {string}
  */
 export function blockstampFromUrl(u) {
-  const emptystamp = "";
+  const ans = extractStamps(u);
+  const delim = ans[0];
+  const ver = ans[1];
+  const blockstamp = ans[2];
+
+  // delim at index 0, version at index 1, blockstamp at index 2
+  if (util.emptyString(ver) || util.emptyString(blockstamp)) return "";
+
+  return ver + delim + blockstamp;
+}
+
+/**
+ * @param {URL} url
+ * @returns {String} stampvalue
+ */
+export function recBlockstampFrom(url) {
+  // is the incoming request to the legacy free.bravedns.com endpoint?
+  const isFreeBraveDns = url.hostname.includes("free.bravedns");
+  if (isFreeBraveDns) return "rec";
+
+  for (const [k, v] of recBlockstamps) {
+    // does incoming request have a rec in its path? (DoH)
+    if (
+      url.pathname.includes("/" + k + "/") ||
+      url.pathname.endsWith("/" + k)
+    ) {
+      return v;
+    }
+    // does incoming request have a rec in its hostname? (DoT)
+    if (url.hostname.startsWith(k + ".")) return v;
+  }
+
+  return "";
+}
+
+/**
+ * @param {string} u - Request URL string
+ * @returns {Array<string>} s - delim, version, blockstamp (flag), accesskey
+ */
+export function extractStamps(u) {
   const url = new URL(u);
-  let s = emptystamp;
+  const recStamp = recBlockstampFrom(url);
+  const useRecStamp = !util.emptyString(recStamp);
 
   const paths = url.pathname.split("/");
 
-  if (paths.length <= 1) {
-    return s;
+  if (!useRecStamp && paths.length <= 1) {
+    return emptystamp;
   }
 
-  // skip to next if path has `/dns-query` or `/gateway`
-  if (util.isDnsQuery(paths[1]) || util.isGatewayQuery(paths[1])) {
-    s = paths[2] || emptystamp;
-  } else {
-    s = paths[1] || emptystamp;
+  let s = emptystr;
+  // note: the legacy free.bravedns endpoint need not support
+  // gateway queries or auth
+  if (useRecStamp) {
+    s = recStamp;
   }
 
-  // check if paths[1|2] is a valid stamp
+  for (const p of paths) {
+    if (p.length === 0) continue;
+    // skip to next if path has `/dns-query` or `/gateway` or '/l:'
+    if (isStampQuery(p)) {
+      s = p;
+      break;
+    }
+  }
+
+  // get blockstamp with access-key from paths[1|2]
   try {
-    isB32Stamp(s);
+    return splitBlockstamp(s);
   } catch (e) {
     log.d("Rdns:blockstampFromUrl", e);
-    s = emptystamp;
   }
 
-  return s;
+  return emptystamp;
 }
 
 export function base64ToUintV0(b64Flag) {
@@ -317,6 +377,22 @@ export function base32ToUintV1(flag) {
   // TODO: check for empty flag
   const b32 = decodeURI(flag);
   return bufutil.decodeFromBinaryArray(rbase32(b32));
+}
+
+export function splitBlockstamp(s) {
+  // delim, version, blockstamp, accesskey
+  let out = ["", "", "", ""];
+
+  if (util.emptyString(s)) return out;
+  if (!isStampQuery(s)) return out;
+
+  if (isB32Stamp(s)) {
+    out = [_b32delim, ...s.split(_b32delim)];
+  } else {
+    out = [_b64delim, ...s.split(_b64delim)];
+  }
+
+  return out;
 }
 
 export function isB32Stamp(s) {
@@ -380,4 +456,35 @@ export function hasBlockstamp(blockInfo) {
     !util.emptyObj(blockInfo) &&
     !util.emptyArray(blockInfo.userBlocklistFlagUint)
   );
+}
+
+// returns true if tstamp is of form yyyy/epochMs
+function isValidFullTimestamp(tstamp) {
+  if (typeof tstamp !== "string") return false;
+  return tstamp.indexOf("/") === 4;
+}
+
+// from: github.com/celzero/downloads/blob/main/src/timestamp.js
+export function bareTimestampFrom(tstamp) {
+  // strip out "/" if tstamp is of form yyyy/epochMs
+  if (isValidFullTimestamp(tstamp)) {
+    tstamp = tstamp.split("/")[1];
+  }
+  const t = parseInt(tstamp);
+  if (isNaN(t)) {
+    log.w("Rdns bareTstamp: NaN", tstamp);
+    return 0;
+  }
+  return t;
+}
+
+export function blocklists(strflag) {
+  const { userBlocklistFlagUint, flagVersion } = unstamp(strflag);
+  const blocklists = [];
+  if (flagVersion === "1") {
+    return trie.flagsToTags(userBlocklistFlagUint);
+  } else {
+    throw new Error("unknown blocklist version: " + flagVersion);
+  }
+  return blocklists;
 }

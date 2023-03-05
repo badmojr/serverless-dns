@@ -16,6 +16,7 @@ on:
         options:
         - dev
         - prod
+        - one
       commit:
         description: 'git tip commit to deploy'
         default: 'main'
@@ -57,36 +58,49 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3.3.0
         with:
           ref: ${{ env.GIT_REF }}
+          fetch-depth: 0
 
-      - name: Tag?
-        # docs.github.com/en/actions/learn-github-actions/contexts#github-context
-        if: github.ref_type == 'tag' ||  github.event.inputs.environment == 'prod'
+      - name: 🛸 Env?
+        # 'dev' env deploys to default WORKERS_ENV, which is, '' (an empty string)
+        if: github.event.inputs.environment == 'prod' || github.event.inputs.environment == 'one'
         run: |
           echo "WORKERS_ENV=${WENV}" >> $GITHUB_ENV
           echo "COMMIT_SHA=${COMMIT_SHA}" >> $GITHUB_ENV
         shell: bash
         env:
-          # tagged deploy default to prod
+          WENV: ${{ github.event.inputs.environment }}
+          COMMIT_SHA: ${{ github.sha }}
+
+      - name: 🎱 Tag?
+        # docs.github.com/en/actions/learn-github-actions/contexts#github-context
+        if: github.ref_type == 'tag'
+        run: |
+          echo "WORKERS_ENV=${WENV}" >> $GITHUB_ENV
+          echo "COMMIT_SHA=${COMMIT_SHA}" >> $GITHUB_ENV
+        shell: bash
+        env:
+          # tagged deploys always deploy to prod
           WENV: 'prod'
           COMMIT_SHA: ${{ github.sha }}
 
+        # npm (and node16) are installed by wrangler-action in a pre-job setup
       - name: 🏗 Get dependencies
         run: npm i
 
       - name: 📚 Wrangler publish
         # github.com/cloudflare/wrangler-action
-        uses: cloudflare/wrangler-action@1.3.0
+        uses: cloudflare/wrangler-action@2.0.0
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           # input overrides env-defaults, regardless
           environment: ${{ env.WORKERS_ENV }}
         env:
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           GIT_COMMIT_ID: ${{ env.GIT_REF }}
 
-      - name: Notice
+      - name: 🎤 Notice
         run: |
           echo "::notice::Deployed to ${WORKERS_ENV} / ${GIT_REF} @ ${COMMIT_SHA}"

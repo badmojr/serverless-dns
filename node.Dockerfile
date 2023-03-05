@@ -1,14 +1,14 @@
-FROM node:alpine as setup
-# todo: is git required?
-RUN apk --no-cache add git
+FROM node:19 as setup
+# git is required if any of the npm packages are git[hub] packages
+RUN apt-get update && apt-get install git -yq --no-install-suggests --no-install-recommends
 WORKDIR /node-dir
 COPY . .
-# get deps
-RUN npm install --no-package-lock --no-fund --ignore-scripts
-# bundle it up
-RUN npx webpack --config webpack.fly.cjs
+# get deps, build, bundle
+RUN npm i
+RUN npm run build:fly
+# or RUN npx webpack --config webpack.fly.cjs
 # download blocklists and bake them in the img
-RUN export BLOCKLIST_DOWNLOAD_ONLY=true && node ./dist/fly.cjs
+RUN export BLOCKLIST_DOWNLOAD_ONLY=true && node ./dist/fly.mjs
 
 # stage 2
 FROM node:alpine AS runner
@@ -20,7 +20,8 @@ ENV NODE_ENV production
 WORKDIR /app
 COPY --from=setup /node-dir/dist ./
 COPY --from=setup /node-dir/blocklists__ ./blocklists__
+COPY --from=setup /node-dir/dbip__ ./dbip__
 # print files in work dir, must contain blocklists
 RUN ls -Fla
 # run with the default entrypoint (usually, bash or sh)
-CMD ["node", "./fly.cjs"]
+CMD ["node", "./fly.mjs"]
